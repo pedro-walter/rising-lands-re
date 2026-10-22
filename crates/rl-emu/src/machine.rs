@@ -70,6 +70,10 @@ pub struct State {
     pub tls: Vec<u32>,
     pub last_error: u32,
     pub com: com::Com,
+    pub mixer: crate::audio::Shared,
+    /// Track files for CD audio (`trackNN.raw` in the disc root).
+    pub cd_tracks: HashMap<u32, std::sync::Arc<Vec<u8>>>,
+    pub cd_format_tmsf: bool,
     pub finds: HashMap<u32, crate::vfs::Find>,
     pub next_handle: u32,
     pub cursor: (i32, i32),
@@ -220,6 +224,9 @@ impl Machine {
             tls: vec![0; 64],
             last_error: 0,
             com: com::Com::default(),
+            mixer: Default::default(),
+            cd_tracks: HashMap::new(),
+            cd_format_tmsf: false,
             finds: HashMap::new(),
             next_handle: 0x2000,
             cursor: (0, 0),
@@ -313,7 +320,14 @@ impl Machine {
             .iter()
             .map(|(n, r)| format!("{n}={:#x}", reg(&self.uc, *r)))
             .collect();
-            return Err(format!("guest fault {e:?} at eip={eip:#x} {}", regs.join(" ")).into());
+            let esp = reg(&self.uc, RegisterX86::ESP);
+            let stack: Vec<String> = (0..24).map(|i| rd32(&self.uc, esp + i * 4)).filter(|v| (0x401000..0x494000).contains(v)).map(|v| format!("{v:#x}")).collect();
+            if std::env::var_os("RL_STACKDUMP").is_some() {
+                for i in 0..48 {
+                    eprintln!("  [esp+{:#x}] = {:#x}", i * 4, rd32(&self.uc, esp + i * 4));
+                }
+            }
+            return Err(format!("guest fault {e:?} at eip={eip:#x} {} | code addrs on stack: {}", regs.join(" "), stack.join(" ")).into());
         }
         match self.uc.get_data_mut().pending.take() {
             Some(Action::Exit(code)) => return Ok(Some(code)),

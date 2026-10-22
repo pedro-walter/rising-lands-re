@@ -533,12 +533,9 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
         "#1" | "#2" => 0x8877_0000, // DirectPlay: unavailable
         "mciSendStringA" => {
             let cmd = rd_cstr(uc, a[0]);
-            if uc.get_data().log_calls {
-                eprintln!("[mci] {cmd}");
-            }
-            1 // MCIERR: no CD audio yet
+            mci_string(uc, &cmd, a[1], a[2])
         }
-        "mciSendCommandA" => 1,
+        "mciSendCommandA" => mci_command(uc, a[0], a[1], a[2], a[3]),
         "MCIWndCreateA" => 0,
         _ => {
             log_unknown(uc, &name, a);
@@ -609,5 +606,100 @@ fn pace_frame(uc: &mut Uc) {
     } else {
         // Fell behind (or first call): don't try to catch up with a burst of frames.
         uc.get_data_mut().next_frame = now + interval;
+    }
+}
+
+fn cd_track(uc: &mut Uc, n: u32) -> Option<std::sync::Arc<Vec<u8>>> {
+    if let Some(t) = uc.get_data().cd_tracks.get(&n) {
+        return Some(t.clone());
+    }
+    let p = uc.get_data().vfs.resolve(&format!("D:\\track{n:02}.raw"))?;
+    let t = std::sync::Arc::new(std::fs::read(p).ok()?);
+    uc.get_data_mut().cd_tracks.insert(n, t.clone());
+    Some(t)
+}
+
+/// The subset of MCI string commands the game uses for CD audio. Tracks 2 and 3 of the
+/// disc are CD audio; the extracted files are raw 44.1 kHz stereo 16-bit.
+fn mci_string(uc: &mut Uc, cmd: &str, ret: u32, ret_len: u32) -> u32 {
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    let reply = |uc: &mut Uc, s: &str| {
+        if ret != 0 && ret_len > 0 {
+            wr_cstr(uc, ret, s, ret_len as usize);
+        }
+    };
+    if uc.get_data().log_calls {
+        eprintln!("[mci] {cmd}");
+    }
+    match words.as_slice() {
+        ["open", _, "type", "cdaudio", ..] => 0,
+        ["close", ..] => 0,
+        ["stop", ..] => {
+            uc.get_data().mixer.lock().unwrap().cd = None;
+            0
+        }
+        ["set", _, "time", "format", fmt, ..] => {
+            uc.get_data_mut().cd_format_tmsf = *fmt == "tmsf";
+            0
+        }
+        ["status", _, "number", "of", "tracks", ..] => {
+            reply(uc, "3");
+            0
+        }
+        ["status", _, "length", "track", n, ..] => {
+            let n: u32 = n.parse().unwrap_or(0);
+            match cd_track(uc, n) {
+                Some(t) => {
+                    let ms = t.len() as u64 * 1000 / (44100 * 4);
+                    if uc.get_data().cd_format_tmsf {
+                        // Minutes, seconds, frames (75 per second) packed as "mm:ss:ff".
+                        let (m, s, f) = (ms / 60000, ms / 1000 % 60, ms % 1000 * 75 / 1000);
+                        reply(uc, &format!("{m:02}:{s:02}:{f:02}"));
+                    } else {
+                        reply(uc, &ms.to_string());
+                    }
+                    0
+                }
+                None => 263,
+            }
+        }
+        ["play", _, "from", from, ..] => {
+            // With the tmsf format the low byte of the position is the track number.
+            let v: u32 = from.parse().unwrap_or(0);
+            let track = if uc.get_data().cd_format_tmsf { v & 0xff } else { v };
+            match cd_track(uc, track) {
+                Some(t) => {
+                    uc.get_data().mixer.lock().unwrap().cd = Some(crate::audio::Cd { data: t, pos: 0 });
+                    0
+                }
+                None => 263,
+            }
+        }
+        _ => {
+            eprintln!("[mci] unhandled: {cmd}");
+            263
+        }
+    }
+}
+
+/// MCI commands for AVI playback (the intro, victory and defeat movies).
+/// Movies are not decoded yet: they "play" and finish immediately so the game carries on.
+fn mci_command(uc: &mut Uc, device: u32, msg: u32, flags: u32, params: u32) -> u32 {
+    if uc.get_data().log_calls {
+        eprintln!("[mci] command dev={device} msg={msg:#x} flags={flags:#x} params={params:#x}");
+    }
+    match msg {
+        0x803 => {
+            // MCI_OPEN: report device id 1.
+            wr32(uc, params + 4, 1);
+            0
+        }
+        0x814 => {
+            // MCI_STATUS: dwItem at +8; for MCI_STATUS_MODE report "stopped".
+            wr32(uc, params + 4, 0x20d);
+            0
+        }
+        0x841 | 0x806 | 0x804 | 0x842 => 0,
+        _ => 0,
     }
 }

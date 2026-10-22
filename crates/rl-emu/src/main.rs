@@ -1,5 +1,6 @@
 //! Runs RISING.EXE on a software x86 CPU with host-provided Windows and DirectX.
 
+mod audio;
 mod com;
 mod frontend;
 mod machine;
@@ -98,7 +99,7 @@ fn main() -> ExitCode {
     let mut fe = if headless {
         None
     } else {
-        match frontend::Frontend::new(1) {
+        match frontend::Frontend::new(1, m.uc.get_data().mixer.clone()) {
             Ok(f) => Some(f),
             Err(e) => {
                 eprintln!("error: cannot open a window: {e}");

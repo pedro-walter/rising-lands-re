@@ -74,7 +74,7 @@ pub fn post(uc: &mut Uc, message: u32, wparam: u32, lparam: u32) {
 }
 
 impl Frontend {
-    pub fn new(scale: u32) -> Result<Frontend, String> {
+    pub fn new(scale: u32, mixer: crate::audio::Shared) -> Result<Frontend, String> {
         let sdl = sdl2::init()?;
         let video = sdl.video()?;
         let window = video
@@ -88,6 +88,12 @@ impl Frontend {
         let creator: &'static TextureCreator<WindowContext> = Box::leak(Box::new(canvas.texture_creator()));
         let tex = creator.create_texture_streaming(PixelFormatEnum::ABGR8888, 800, 600).map_err(|e| e.to_string())?;
         video.text_input().start();
+        let audio_dev = crate::audio::open(&sdl, mixer);
+        if audio_dev.is_none() {
+            eprintln!("warning: no audio device");
+        }
+        // The device stops when dropped; keep it for the life of the program.
+        std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
         Ok(Frontend { _sdl: sdl, canvas, tex, _creator: creator, events, shown: 0, sent_activate: false })
     }
