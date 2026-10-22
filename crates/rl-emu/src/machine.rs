@@ -110,6 +110,8 @@ pub struct State {
     pub click_aligned: bool,
     /// `--skip-intro`: the game's movies are reported as missing so it moves on at once.
     pub skip_movies: bool,
+    /// Debug console: finish buildings the moment they are placed.
+    pub instant_build: bool,
     pub next_frame: Instant,
     pub log_calls: bool,
     pub strings: HashMap<&'static str, u32>,
@@ -312,6 +314,7 @@ impl Machine {
             speed: 1.0,
             click_aligned: false,
             skip_movies: false,
+            instant_build: false,
             next_frame: Instant::now(),
             log_calls: std::env::var_os("RL_LOG_CALLS").is_some(),
             strings: HashMap::new(),

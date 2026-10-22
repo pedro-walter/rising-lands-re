@@ -650,6 +650,7 @@ fn scroll_click_assist(uc: &mut Uc) {
 /// game runs at the intended speed instead of as fast as the host allows.
 fn pace_frame(uc: &mut Uc) {
     scroll_click_assist(uc);
+    crate::debug::tick(uc);
     let now = std::time::Instant::now();
     let (next, interval) = (uc.get_data().next_frame, uc.get_data().frame_interval.div_f64(uc.get_data().speed));
     if next > now {
