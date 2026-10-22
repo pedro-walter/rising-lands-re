@@ -33,6 +33,8 @@ cargo run --release -p rl-tool -- disc RISING_LANDS_BR_.BIN original
 
 # 2. Play (defaults to ./original/INSTALHD and ./original)
 cargo run --release -p rl-emu
+cargo run --release -p rl-emu -- --skip-intro   # no movies
+cargo run --release -p rl-emu -- --new-game     # no movies, clicks through the menus into mission 1
 ```
 
 Keys: the game's own; `Alt+Enter` toggles fullscreen, `F11` switches 800x600 / 640x480 (the

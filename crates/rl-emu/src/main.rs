@@ -143,7 +143,11 @@ fn dump_avi(args: &[String]) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    // Prototyping flags: `--skip-intro` drops the movies, `--new-game` clicks through the menus into mission 1.
+    let skip_intro = args.iter().any(|a| a == "--skip-intro" || a == "--new-game");
+    let new_game = args.iter().any(|a| a == "--new-game");
+    args.retain(|a| !a.starts_with("--") || a == "--avi");
     if args.first().map(String::as_str) == Some("--avi") && args.len() >= 5 {
         return dump_avi(&args);
     }
@@ -181,6 +185,15 @@ fn main() -> ExitCode {
     };
     let script = env::var("RL_SCRIPT").map(|s| parse_script(&s)).unwrap_or_default();
     let mut script = script.into_iter().peekable();
+    m.uc.get_data_mut().skip_movies = skip_intro;
+    // `--new-game`: once the main menu is up (first frame after the movies), click Novo jogo, the
+    // first campaign and the first mission. Times are relative to that first frame.
+    let mut auto: std::collections::VecDeque<Step> = if new_game {
+        parse_script("1.0:move:400,296;1.5:click:400,296;3:move:400,321;3.5:click:400,321;6:move:400,296;6.5:click:400,296").into()
+    } else {
+        Default::default()
+    };
+    let mut auto_t0: Option<std::time::Instant> = None;
     let start = std::time::Instant::now();
     let mut activated = fe.is_some();
     loop {
@@ -192,6 +205,17 @@ fn main() -> ExitCode {
             let st = script.next().unwrap();
             if !run_script_step(&mut m, &st) {
                 return ExitCode::SUCCESS;
+            }
+        }
+        if !auto.is_empty() {
+            if auto_t0.is_none() && m.uc.get_data().com.frames_presented > 60 {
+                auto_t0 = Some(std::time::Instant::now());
+            }
+            if let Some(t0) = auto_t0 {
+                while auto.front().is_some_and(|s| s.at <= t0.elapsed().as_secs_f64()) {
+                    let st = auto.pop_front().unwrap();
+                    run_script_step(&mut m, &st);
+                }
             }
         }
         video_tick(&mut m);

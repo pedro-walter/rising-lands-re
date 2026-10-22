@@ -136,7 +136,11 @@ fn format_printf(uc: &Uc, fmt: &str, mut argp: u32) -> String {
 
 /// Runs an imported function. Returns the value for EAX, if any.
 pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<u32> {
+    let t0 = std::time::Instant::now();
     let r = call_import_inner(uc, idx, addr, a);
+    if t0.elapsed().as_millis() >= 5 && std::env::var_os("RL_LOG_SLOW").is_some() {
+        eprintln!("[slow] {} took {:?} (a0={:#x})", uc.get_data().stubs[idx].name, t0.elapsed(), a[0]);
+    }
     // The message pump is where the host gets control back (events, frame pacing). Yield there
     // deterministically instead of relying on CPU timeouts, which could stop the CPU between a
     // stub's hook and its `ret` and make the handler's result get lost.
@@ -653,6 +657,9 @@ fn pace_frame(uc: &mut Uc) {
         uc.get_data_mut().next_frame = next + interval;
     } else {
         // Fell behind (or first call): don't try to catch up with a burst of frames.
+        if std::env::var_os("RL_LOG_SLOW").is_some() && now - next > std::time::Duration::from_millis(60) {
+            eprintln!("[late] frame {:?} over budget", now - next);
+        }
         uc.get_data_mut().next_frame = now + interval;
     }
 }
@@ -742,7 +749,7 @@ fn mci_command(uc: &mut Uc, device: u32, msg: u32, flags: u32, params: u32) -> u
             if uc.get_data().log_calls {
                 eprintln!("[mci] open movie {name:?}");
             }
-            let Some(host) = uc.get_data().vfs.resolve(&name) else {
+            let Some(host) = uc.get_data().vfs.resolve(&name).filter(|_| !uc.get_data().skip_movies) else {
                 eprintln!("[mci] movie not found: {name:?}");
                 wr32(uc, params + 4, 1);
                 return 0; // let the game carry on without the movie
