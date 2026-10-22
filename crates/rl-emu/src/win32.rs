@@ -419,7 +419,7 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
                 for (i, v) in fields.iter().enumerate() {
                     wr32(uc, cs + i as u32 * 4, *v);
                 }
-                stop_with(uc, Action::Call { target: proc_, args: vec![hwnd, 1, 0, cs], resume: addr, set_eax: Some(hwnd) });
+                stop_with(uc, Action::call(proc_, vec![hwnd, 1, 0, cs], addr, Some(hwnd)));
             }
             hwnd
         }
@@ -468,7 +468,7 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
         "SendMessageA" => {
             let proc_ = uc.get_data().windows.get(((a[0].wrapping_sub(0x1000)) / 4) as usize).map(|w| w.proc_).unwrap_or(0);
             if proc_ != 0 {
-                stop_with(uc, Action::Call { target: proc_, args: vec![a[0], a[1], a[2], a[3]], resume: addr, set_eax: None });
+                stop_with(uc, Action::call(proc_, vec![a[0], a[1], a[2], a[3]], addr, None));
             }
             0
         }
@@ -518,7 +518,7 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
             let proc_ = uc.get_data().windows.get(((hwnd.wrapping_sub(0x1000)) / 4) as usize).map(|w| w.proc_).unwrap_or(0);
             if proc_ != 0 {
                 let (m, w, l) = (rd32(uc, a[0] + 4), rd32(uc, a[0] + 8), rd32(uc, a[0] + 12));
-                stop_with(uc, Action::Call { target: proc_, args: vec![hwnd, m, w, l], resume: addr, set_eax: None });
+                stop_with(uc, Action::call(proc_, vec![hwnd, m, w, l], addr, None));
             }
             0
         }
@@ -535,7 +535,8 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
         // ---- DirectX and multimedia ----
         "DirectDrawCreate" => com::direct_draw_create(uc, a[1]),
         "DirectSoundCreate" => com::direct_sound_create(uc, a[1]),
-        "#1" | "#2" => 0x8877_0000, // DirectPlay: unavailable
+        "#1" => crate::dplay::create(uc, a[1]),
+        "#2" => return crate::dplay::enumerate(uc, a[0], a[1], addr),
         "mciSendStringA" => {
             let cmd = rd_cstr(uc, a[0]);
             mci_string(uc, &cmd, a[1], a[2])

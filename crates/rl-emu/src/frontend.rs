@@ -1,6 +1,7 @@
 //! SDL2 window: presents the guest's primary surface and feeds input to the guest.
 
-use crate::{com, machine::*};
+use crate::{com, machine::*, overlay};
+use std::time::Instant;
 use sdl2::{
     event::{Event, WindowEvent},
     keyboard::Keycode,
@@ -27,6 +28,24 @@ const WM_MBUTTONDOWN: u32 = 0x0207;
 const WM_MBUTTONUP: u32 = 0x0208;
 const WM_ACTIVATEAPP: u32 = 0x001c;
 
+/// Requests from the host side that need the user (the game itself has no UI for them).
+#[derive(Default)]
+pub struct Ui {
+    /// Set when a join screen found no sessions: ask for the host's address.
+    pub want_host_address: bool,
+    /// A short message shown for a few seconds.
+    pub toast: Option<(String, Instant)>,
+    /// Address typed by the user, waiting to be handed to the network layer.
+    pub submitted_host: Option<String>,
+    pub last_host: String,
+}
+
+impl Ui {
+    pub fn toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now()));
+    }
+}
+
 pub struct Frontend {
     _sdl: Sdl,
     canvas: Canvas<Window>,
@@ -38,6 +57,10 @@ pub struct Frontend {
     shown: u64,
     sent_activate: bool,
     movie_tex: Option<Texture<'static>>,
+    /// Text being typed in the host-address prompt, when it is open.
+    prompt: Option<String>,
+    last_frame: Option<(u32, u32, Vec<u8>)>,
+    was_overlay: bool,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -103,7 +126,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -112,8 +135,38 @@ impl Frontend {
             self.sent_activate = true;
             activate(uc);
         }
+        if uc.get_data().ui.want_host_address && self.prompt.is_none() {
+            uc.get_data_mut().ui.want_host_address = false;
+            self.prompt = Some(uc.get_data().ui.last_host.clone());
+        }
         let events: Vec<Event> = self.events.poll_iter().collect();
         for e in events {
+            // While the prompt is open it gets all the keyboard input.
+            if let Some(text) = self.prompt.as_mut() {
+                match &e {
+                    Event::TextInput { text: t, .. } => text.extend(t.chars().filter(|c| c.is_ascii_alphanumeric() || ".:-_[]".contains(*c))),
+                    Event::KeyDown { keycode: Some(Keycode::Backspace), .. } => {
+                        text.pop();
+                    }
+                    Event::KeyDown { keycode: Some(Keycode::Return | Keycode::KpEnter), .. } => {
+                        let t = text.trim().to_string();
+                        self.prompt = None;
+                        if !t.is_empty() {
+                            uc.get_data_mut().ui.last_host = t.clone();
+                            uc.get_data_mut().ui.submitted_host = Some(t);
+                        }
+                        continue;
+                    }
+                    Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                        self.prompt = None;
+                        continue;
+                    }
+                    _ => {}
+                }
+                if !matches!(e, Event::Quit { .. }) {
+                    continue;
+                }
+            }
             match e {
                 Event::Quit { .. } => return false,
                 Event::MouseMotion { x, y, .. } => {
@@ -180,24 +233,48 @@ impl Frontend {
             return;
         }
         let n = uc.get_data().com.frames_presented;
-        if n == self.shown {
+        let toast = uc.get_data().ui.toast.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 8).map(|(s, _)| s.clone());
+        let overlay_on = self.prompt.is_some() || toast.is_some();
+        if n == self.shown && !overlay_on && !self.was_overlay {
             return;
         }
         self.shown = n;
-        if let Some((w, h, rgba)) = com::snapshot(uc) {
-            // F11 switches the game between 800x600 and 640x480.
-            if (w, h) != self.tex_size {
-                if let Ok(t) = self._creator.create_texture_streaming(PixelFormatEnum::ABGR8888, w, h) {
-                    self.tex = t;
-                    self.tex_size = (w, h);
-                    let _ = self.canvas.set_logical_size(w, h);
-                }
+        self.was_overlay = overlay_on;
+        if n != 0 {
+            if let Some(f) = com::snapshot(uc) {
+                self.last_frame = Some(f);
             }
-            let _ = self.tex.update(None, &rgba, w as usize * 4);
-            self.canvas.clear();
-            let _ = self.canvas.copy(&self.tex, None, None);
-            self.canvas.present();
         }
+        let Some((w, h, mut rgba)) = self.last_frame.clone() else { return };
+        // F11 switches the game between 800x600 and 640x480.
+        if (w, h) != self.tex_size {
+            if let Ok(t) = self._creator.create_texture_streaming(PixelFormatEnum::ABGR8888, w, h) {
+                self.tex = t;
+                self.tex_size = (w, h);
+                let _ = self.canvas.set_logical_size(w, h);
+            }
+        }
+        let stride = w as usize;
+        if let Some(text) = &self.prompt {
+            let label = "ENDERECO DO ANFITRIAO (IP OU IP:PORTA) - ENTER CONFIRMA, ESC CANCELA";
+            let line = format!("{text}_");
+            let bw = (overlay::text_width(label, 2) + 24).min(stride - 8);
+            let (bx, by) = ((stride - bw) / 2, h as usize / 2 - 30);
+            overlay::fill_rect(&mut rgba, stride, bx, by, bw, 70, [20, 12, 8, 255]);
+            overlay::fill_rect(&mut rgba, stride, bx, by, bw, 2, [220, 170, 90, 255]);
+            overlay::fill_rect(&mut rgba, stride, bx, by + 68, bw, 2, [220, 170, 90, 255]);
+            overlay::draw_text(&mut rgba, stride, bx + 12, by + 12, label, 2, [230, 200, 140, 255]);
+            overlay::draw_text(&mut rgba, stride, bx + 12, by + 40, &line, 3, [255, 255, 255, 255]);
+        }
+        if let Some(t) = toast {
+            let bw = overlay::text_width(&t, 2) + 20;
+            overlay::fill_rect(&mut rgba, stride, 8, 8, bw.min(stride - 16), 26, [20, 12, 8, 220]);
+            overlay::draw_text(&mut rgba, stride, 18, 14, &t, 2, [230, 200, 140, 255]);
+        }
+        let _ = self.tex.update(None, &rgba, w as usize * 4);
+        self.canvas.clear();
+        let _ = self.canvas.copy(&self.tex, None, None);
+        self.canvas.present();
     }
 }
 

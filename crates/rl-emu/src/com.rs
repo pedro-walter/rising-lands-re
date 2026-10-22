@@ -18,6 +18,7 @@ pub struct Com {
     pub primary: Option<u32>,
     pub frames_presented: u64,
     pub log: bool,
+    pub dplay: Option<crate::dplay::Dp>,
 }
 
 pub enum Obj {
@@ -26,6 +27,7 @@ pub enum Obj {
     Palette([u8; 1024]),
     DSound,
     DsBuffer { mem: u32, size: u32, primary: bool },
+    DPlay,
 }
 
 pub struct Surface {
@@ -60,6 +62,20 @@ const SURFACE: &[Method] = &[
 
 const PALETTE: &[Method] =
     &[("QueryInterface", 3), ("AddRef", 1), ("Release", 1), ("GetCaps", 2), ("GetEntries", 5), ("Initialize", 4), ("SetEntries", 5)];
+
+const DPLAY: &[Method] = &[
+    ("QueryInterface", 3), ("AddRef", 1), ("Release", 1), ("AddPlayerToGroup", 3), ("Close", 1), ("CreateGroup", 6),
+    ("CreatePlayer", 7), ("DeletePlayerFromGroup", 3), ("DestroyGroup", 2), ("DestroyPlayer", 2), ("EnumGroupPlayers", 6),
+    ("EnumGroups", 5), ("EnumPlayers", 5), ("EnumSessions", 6), ("GetCaps", 3), ("GetGroupData", 5), ("GetGroupName", 4),
+    ("GetMessageCount", 3), ("GetPlayerAddress", 4), ("GetPlayerCaps", 4), ("GetPlayerData", 5), ("GetPlayerName", 4),
+    ("GetSessionDesc", 3), ("Initialize", 2), ("Open", 3), ("Receive", 6), ("Send", 6), ("SetGroupData", 5),
+    ("SetGroupName", 4), ("SetPlayerData", 5), ("SetPlayerName", 4), ("SetSessionDesc", 3),
+    // IDirectPlay3
+    ("AddGroupToGroup", 3), ("CreateGroupInGroup", 7), ("DeleteGroupFromGroup", 3), ("EnumConnections", 5),
+    ("EnumGroupsInGroup", 6), ("GetGroupConnectionSettings", 5), ("InitializeConnection", 3), ("SecureOpen", 4),
+    ("SendChatMessage", 5), ("SetGroupConnectionSettings", 4), ("StartSession", 4), ("GetGroupFlags", 3),
+    ("GetGroupParent", 3), ("GetPlayerAccount", 5), ("GetPlayerFlags", 3),
+];
 
 const DSOUND: &[Method] = &[
     ("QueryInterface", 3), ("AddRef", 1), ("Release", 1), ("CreateSoundBuffer", 4), ("GetCaps", 2),
@@ -104,6 +120,10 @@ pub fn direct_draw_create(uc: &mut Uc, out: u32) -> u32 {
     let o = new_object(uc, "IDirectDraw", DDRAW, Obj::DDraw);
     wr32(uc, out, o);
     0
+}
+
+pub fn new_dplay_object(uc: &mut Uc) -> u32 {
+    new_object(uc, "IDirectPlay", DPLAY, Obj::DPlay)
 }
 
 pub fn direct_sound_create(uc: &mut Uc, out: u32) -> u32 {
@@ -181,6 +201,12 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
                 uc.get_data().mixer.lock().unwrap().voices.remove(&this);
             }
             n
+        }
+        ("IDirectPlay", "QueryInterface") => {
+            // Any interface the game asks for is served by the same object type.
+            let o = new_dplay_object(uc);
+            wr32(uc, a[2], o);
+            0
         }
         (_, "QueryInterface") => 0x8000_4002,
         ("IDirectDraw", "SetCooperativeLevel") => 0,
@@ -311,6 +337,7 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             0
         }
         ("IDirectDrawPalette", "GetEntries") => 0,
+        ("IDirectPlay", m) => return crate::dplay::call_method(uc, m, a, addr),
         ("IDirectSound", "CreateSoundBuffer") => {
             let desc = a[1];
             let flags = rd32(uc, desc + 4);

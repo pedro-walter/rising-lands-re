@@ -21,16 +21,29 @@ Fixes live in the host side or as small patches:
 ## Quick start
 
 ```sh
-# 1. Extract the disc image (BIN/CUE, MODE2/2352) into a folder
+# 1. Extract the disc image (BIN/CUE, MODE2/2352) into a folder: game files, levels, movies
+#    and the CD audio tracks (track02.raw, track03.raw)
 cargo run --release -p rl-tool -- disc RISING_LANDS_BR_.BIN original
 
-# 2. Play (INSTALHD is the game folder, `original` is the disc root)
-cargo run --release -p rl-emu -- original/INSTALHD original
+# 2. Play (defaults to ./original/INSTALHD and ./original)
+cargo run --release -p rl-emu
 ```
 
-The disc layout is `INSTALHD/` (the game), `WORLD/` and `EVENTS/` (levels and movies) and the CD
-audio tracks as `track02.raw`, `track03.raw` (raw 44.1 kHz 16-bit stereo; extract them from the
-CUE with any tool).
+Keys: the game's own; `Alt+Enter` toggles fullscreen, `F11` switches 800x600 / 640x480 (the
+game's own key), `Esc` skips a movie. The first menu click plays the intro movie; press `Esc`.
+
+## Multiplayer
+
+The original DirectPlay connection is replaced by a direct TCP connection:
+
+* **Host**: choose *Vários jogadores* → the TCP/IP provider → *Iniciar uma sessão*. The game tells
+  you your LAN address and, if your router supports UPnP, your public address (the port is
+  forwarded automatically; set `RL_NO_UPNP=1` to prevent that).
+* **Join**: *Vários jogadores* → provider → *Entrar numa sessão*. Hosts on the same LAN show up
+  automatically. Otherwise a box asks for the host's address (`ip` or `ip:port`, TCP/UDP 47624).
+  `RL_JOIN=ip[,ip...]` pre-fills addresses to look at.
+* Messages are sent with `TCP_NODELAY`, without DirectPlay's per-message acknowledgements, which
+  is what made the original so slow.
 
 ## Options (environment variables)
 

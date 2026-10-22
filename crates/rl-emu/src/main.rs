@@ -2,6 +2,10 @@
 
 mod audio;
 mod com;
+mod dplay;
+mod net;
+mod overlay;
+mod upnp;
 mod frontend;
 mod machine;
 mod pe;
@@ -133,6 +137,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Ok(h) = std::fs::read_to_string(userdir().join("lasthost.txt")) {
+        m.uc.get_data_mut().ui.last_host = h.trim().to_string();
+    }
     // Headless: RL_SHOT=<out.png> RL_SECS=<n> renders the primary surface after n seconds (no window).
     let secs: f64 = env::var("RL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);
     let shot = env::var("RL_SHOT").ok();
@@ -164,6 +171,11 @@ fn main() -> ExitCode {
             }
         }
         video_tick(&mut m);
+        if let Some(h) = m.uc.get_data_mut().ui.submitted_host.take() {
+            let _ = std::fs::create_dir_all(userdir());
+            let _ = std::fs::write(userdir().join("lasthost.txt"), &h);
+            m.uc.get_data_mut().com.dplay.get_or_insert_with(dplay::Dp::new).net.add_host(&h);
+        }
         match m.step(8_000) {
             Ok(Some(code)) => {
                 eprintln!("guest exited with {code}");

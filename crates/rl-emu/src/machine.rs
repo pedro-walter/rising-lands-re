@@ -33,10 +33,26 @@ pub struct Stub {
 
 pub enum Action {
     /// Run a guest function, then resume the stub that asked for it.
-    Call { target: u32, args: Vec<u32>, resume: u32, set_eax: Option<u32> },
+    Call { target: u32, args: Vec<u32>, resume: u32, set_eax: Option<u32>, rest: Vec<(u32, Vec<u32>)>, temps: Vec<u32> },
     /// Resume execution at `pc` (return from a callback).
     Resume { pc: u32, set_eax: Option<u32> },
     Exit(u32),
+}
+
+/// A guest callback in progress: what to run next and where to resume afterwards.
+pub struct Frame {
+    pub resume: u32,
+    pub set_eax: Option<u32>,
+    pub rest: Vec<(u32, Vec<u32>)>,
+    /// Guest memory to free once the whole sequence is done.
+    pub temps: Vec<u32>,
+}
+
+impl Action {
+    /// Runs one guest function and then resumes the stub at `resume`.
+    pub fn call(target: u32, args: Vec<u32>, resume: u32, set_eax: Option<u32>) -> Action {
+        Action::Call { target, args, resume, set_eax, rest: Vec::new(), temps: Vec::new() }
+    }
 }
 
 pub struct Msg {
@@ -60,7 +76,7 @@ pub struct State {
     pub skip_once: Option<u32>,
     /// Stub whose host handler just ran; a timeout can stop the CPU before the stub's `ret`.
     pub last_hooked: Option<u32>,
-    pub frames: Vec<(u32, Option<u32>)>,
+    pub frames: Vec<Frame>,
     pub vfs: Vfs,
     pub classes: HashMap<String, u32>,
     pub windows: Vec<Window>,
@@ -70,6 +86,7 @@ pub struct State {
     pub tls: Vec<u32>,
     pub last_error: u32,
     pub com: com::Com,
+    pub ui: crate::frontend::Ui,
     /// AVI opened through MCI, and the movie currently playing (if any).
     pub video_open: Option<crate::video::Avi>,
     pub video: Option<crate::video::Player>,
@@ -227,6 +244,7 @@ impl Machine {
             tls: vec![0; 64],
             last_error: 0,
             com: com::Com::default(),
+            ui: Default::default(),
             video_open: None,
             video: None,
             mixer: Default::default(),
@@ -343,7 +361,7 @@ impl Machine {
                 self.uc.get_data_mut().skip_once = Some(p);
                 self.pc = p;
             }
-            Some(Action::Call { target, args, resume, set_eax }) => {
+            Some(Action::Call { target, args, resume, set_eax, rest, temps }) => {
                 let mut esp = reg(&self.uc, RegisterX86::ESP);
                 for a in args.iter().rev() {
                     esp -= 4;
@@ -352,7 +370,7 @@ impl Machine {
                 esp -= 4;
                 wr32(&mut self.uc, esp, TRAMP);
                 set_reg(&mut self.uc, RegisterX86::ESP, esp);
-                self.uc.get_data_mut().frames.push((resume, set_eax));
+                self.uc.get_data_mut().frames.push(Frame { resume, set_eax, rest, temps });
                 self.pc = target;
             }
             // Timed out or stopped without an action: continue where the guest is.
@@ -375,8 +393,16 @@ fn on_stub(uc: &mut Uc, addr: u32) {
         return;
     }
     if addr == TRAMP {
-        let (resume, set_eax) = uc.get_data_mut().frames.pop().expect("callback return without a frame");
-        uc.get_data_mut().pending = Some(Action::Resume { pc: resume, set_eax });
+        let mut fr = uc.get_data_mut().frames.pop().expect("callback return without a frame");
+        if !fr.rest.is_empty() {
+            let (target, args) = fr.rest.remove(0);
+            uc.get_data_mut().pending = Some(Action::Call { target, args, resume: fr.resume, set_eax: fr.set_eax, rest: fr.rest, temps: fr.temps });
+        } else {
+            for t in fr.temps {
+                uc.get_data_mut().free(t);
+            }
+            uc.get_data_mut().pending = Some(Action::Resume { pc: fr.resume, set_eax: fr.set_eax });
+        }
         let _ = uc.emu_stop();
         return;
     }
