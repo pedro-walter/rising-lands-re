@@ -22,6 +22,7 @@ const WM_CHAR: u32 = 0x0102;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
+const WM_LBUTTONDBLCLK: u32 = 0x0203;
 const WM_RBUTTONDOWN: u32 = 0x0204;
 const WM_RBUTTONUP: u32 = 0x0205;
 const WM_MBUTTONDOWN: u32 = 0x0207;
@@ -188,7 +189,7 @@ impl Frontend {
                     uc.get_data_mut().cursor = (x, y);
                     post(uc, WM_MOUSEMOVE, 0, ((y as u32) << 16) | (x as u32 & 0xffff));
                 }
-                Event::MouseButtonDown { mouse_btn, x, y, .. } | Event::MouseButtonUp { mouse_btn, x, y, .. } => {
+                Event::MouseButtonDown { mouse_btn, x, y, clicks, .. } | Event::MouseButtonUp { mouse_btn, x, y, clicks, .. } => {
                     let down = matches!(e, Event::MouseButtonDown { .. });
                     let (m, vk) = match (mouse_btn, down) {
                         (MouseButton::Left, true) => (WM_LBUTTONDOWN, 1),
@@ -199,6 +200,10 @@ impl Frontend {
                         (MouseButton::Middle, false) => (WM_MBUTTONUP, 4),
                         _ => continue,
                     };
+                    // The game's window class has CS_DBLCLKS and it only raises its "map click" flag on
+                    // WM_LBUTTONDBLCLK (single presses just set the button-down flag), which is how
+                    // double-clicking a building ejects a settler.
+                    let m = if m == WM_LBUTTONDOWN && clicks >= 2 { WM_LBUTTONDBLCLK } else { m };
                     if down {
                         uc.get_data_mut().keys[vk] = true;
                         self.pressed_now.push(vk);
@@ -360,6 +365,11 @@ fn looks_ingame(f: &(u32, u32, Vec<u8>)) -> bool {
 
 /// Synthesises input for scripted (headless) runs.
 pub fn inject_mouse(uc: &mut Uc, x: i32, y: i32, button: Option<(bool, bool)>) {
+    inject_mouse_msg(uc, x, y, button, false)
+}
+
+/// `dbl` turns a left press into the double-click message.
+pub fn inject_mouse_msg(uc: &mut Uc, x: i32, y: i32, button: Option<(bool, bool)>, dbl: bool) {
     uc.get_data_mut().cursor = (x, y);
     let lp = ((y as u32) << 16) | (x as u32 & 0xffff);
     match button {
@@ -367,6 +377,7 @@ pub fn inject_mouse(uc: &mut Uc, x: i32, y: i32, button: Option<(bool, bool)>) {
         Some((right, down)) => {
             uc.get_data_mut().keys[if right { 2 } else { 1 }] = down;
             let m = match (right, down) {
+                (false, true) if dbl => WM_LBUTTONDBLCLK,
                 (false, true) => WM_LBUTTONDOWN,
                 (false, false) => WM_LBUTTONUP,
                 (true, true) => WM_RBUTTONDOWN,
