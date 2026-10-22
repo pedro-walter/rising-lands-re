@@ -361,6 +361,7 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
                 return Some(0x8878_0000 + 0x32);
             };
             let nb = new_object(uc, "IDirectSoundBuffer", DSBUFFER, Obj::DsBuffer { mem, size, primary });
+            sync_voice(uc, a[1]);
             let src = uc.get_data().mixer.lock().unwrap().voices.get(&a[1]).cloned();
             if let Some(mut v) = src {
                 v.playing = false;
@@ -423,6 +424,7 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             0
         }
         ("IDirectSoundBuffer", "Play") => {
+            sync_voice(uc, this);
             if let Some(v) = uc.get_data().mixer.lock().unwrap().voices.get_mut(&this) {
                 v.playing = true;
                 v.looping = a[3] & 1 != 0;
@@ -472,6 +474,7 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             0
         }
         ("IDirectSoundBuffer", "GetStatus") => {
+            sync_voice(uc, this);
             let st = match uc.get_data().mixer.lock().unwrap().voices.get(&this) {
                 Some(v) if v.playing => 1 | if v.looping { 4 } else { 0 },
                 _ => 0,
@@ -480,6 +483,7 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             0
         }
         ("IDirectSoundBuffer", "GetCurrentPosition") => {
+            sync_voice(uc, this);
             let pos = uc.get_data().mixer.lock().unwrap().voices.get(&this).map_or(0, |v| v.pos as u32 * (v.channels as u32 * v.bits as u32 / 8));
             if a[1] != 0 {
                 wr32(uc, a[1], pos);
@@ -495,6 +499,22 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             0x8876_0000 + 0x0b0
         }
     })
+}
+
+/// Copies a secondary buffer's guest memory into the mixer's copy. The game fills its buffers by
+/// writing straight into the memory it got from `Lock` (also after `Unlock`), so `Unlock` alone
+/// sees only part of the sound and speech was cut short.
+fn sync_voice(uc: &mut Uc, buf: u32) {
+    let (mem, size) = match uc.get_data().com.objs.get(&buf) {
+        Some(Obj::DsBuffer { mem, size, primary: false }) => (*mem, *size),
+        _ => return,
+    };
+    let bytes = rd_bytes(uc, mem, size as usize);
+    if let Some(v) = uc.get_data().mixer.lock().unwrap().voices.get_mut(&buf) {
+        if v.data.len() == bytes.len() {
+            v.data = bytes;
+        }
+    }
 }
 
 /// Reads a WAVEFORMATEX at `fmt` into a voice.

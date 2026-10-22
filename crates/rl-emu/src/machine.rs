@@ -240,6 +240,32 @@ pub fn wr_cstr(uc: &mut Uc, addr: u32, s: &str, cap: usize) -> usize {
     bytes.len()
 }
 
+/// Fixes to the game's own code. Each one is only applied when the original bytes are there.
+fn apply_patches(uc: &mut Uc) {
+    // `FUN_0041a4f4(building)` returns `buildings[building].kind` (stride 0x114 at 0x49a0c8) with
+    // no range check. The "building under the cursor" word is 0xffff when nothing is there, so
+    // the thief's steal action read far outside the table and crashed when the pointer moved over
+    // anything that is not a building. Out of range now answers 0xff, which no caller matches.
+    const ORIG: [u8; 8] = [0x52, 0x31, 0xd2, 0x66, 0x89, 0xc2, 0x89, 0xd0];
+    const NEW: [u8; 31] = [
+        0x0f, 0xb7, 0xc0, // movzx eax, ax
+        0x3d, 0xe8, 0x03, 0x00, 0x00, // cmp eax, 1000
+        0x73, 0x0d, // jae bad
+        0x69, 0xc0, 0x14, 0x01, 0x00, 0x00, // imul eax, eax, 0x114
+        0x8a, 0x80, 0xd0, 0xa0, 0x49, 0x00, // mov al, [eax+0x49a0d0]
+        0xc3, // ret
+        0xb0, 0xff, // bad: mov al, 0xff
+        0xc3, // ret
+        0x90, 0x90, 0x90, 0x90, 0x90,
+    ];
+    let mut cur = [0u8; 8];
+    if uc.mem_read(0x41a4f4, &mut cur).is_ok() && cur == ORIG {
+        wr_bytes(uc, 0x41a4f4, &NEW);
+    } else {
+        eprintln!("warning: building accessor patch not applied (different RISING.EXE?)");
+    }
+}
+
 impl Machine {
     pub fn new(exe: &Path, install: &Path, disc: &Path, userdir: &Path) -> Result<Machine, Box<dyn Error>> {
         let bytes = std::fs::read(exe)?;
@@ -289,6 +315,12 @@ impl Machine {
         for (a, d) in &img.chunks {
             wr_bytes(&mut uc, *a, d);
         }
+        apply_patches(&mut uc);
+        // The building table (0x49a0c8, stride 0x114) is indexed by 16-bit ids that may be 0xffff
+        // ("none") with no range check in dozens of accessors; zeroed pages up to the end of what
+        // such an index can reach turn those reads into harmless zeros instead of a fault.
+        let tail = (img.base + img.size + 0xfff) & !0xfff;
+        map(&mut uc, tail, 0x0180_0000 - tail)?;
         map(&mut uc, STACK_TOP - STACK_SIZE, STACK_SIZE)?;
         map(&mut uc, HEAP_BASE, HEAP_SIZE)?;
         map(&mut uc, STUB_BASE, STUB_SIZE)?;

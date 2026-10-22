@@ -61,6 +61,12 @@ pub struct Frontend {
     prompt: Option<String>,
     last_frame: Option<(u32, u32, Vec<u8>)>,
     was_overlay: bool,
+    /// Buttons pressed during this event pass, and releases held back one pass so that a quick
+    /// click is still visible to the game, which polls the button state once per frame.
+    pressed_now: Vec<usize>,
+    late_release: Vec<usize>,
+    /// W/A/S/D scroll the map like the arrow keys (`RL_WASD=1`, toggled with Alt+W).
+    wasd: bool,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -112,8 +118,9 @@ impl Frontend {
         canvas.set_logical_size(800, 600).map_err(|e| e.to_string())?;
         let creator: &'static TextureCreator<WindowContext> = Box::leak(Box::new(canvas.texture_creator()));
         let tex = creator.create_texture_streaming(PixelFormatEnum::ABGR8888, 800, 600).map_err(|e| e.to_string())?;
-        // The game relies on the system pointer, so leave it visible. Grabbing is opt-in.
-        sdl.mouse().show_cursor(true);
+        // The game draws its own pointer. SDL only hides the system one while it is over the window,
+        // so it still shows outside. Grabbing is opt-in (`RL_GRAB`).
+        sdl.mouse().show_cursor(false);
         if std::env::var_os("RL_GRAB").is_some() {
             canvas.window_mut().set_grab(true);
         }
@@ -125,7 +132,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some() })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -138,6 +145,10 @@ impl Frontend {
             uc.get_data_mut().ui.want_host_address = false;
             self.prompt = Some(uc.get_data().ui.last_host.clone());
         }
+        for vk in self.late_release.drain(..) {
+            uc.get_data_mut().keys[vk] = false;
+        }
+        self.pressed_now.clear();
         let events: Vec<Event> = self.events.poll_iter().collect();
         for e in events {
             // While the prompt is open it gets all the keyboard input.
@@ -183,7 +194,14 @@ impl Frontend {
                         (MouseButton::Middle, false) => (WM_MBUTTONUP, 4),
                         _ => continue,
                     };
-                    uc.get_data_mut().keys[vk] = down;
+                    if down {
+                        uc.get_data_mut().keys[vk] = true;
+                        self.pressed_now.push(vk);
+                    } else if self.pressed_now.contains(&vk) {
+                        self.late_release.push(vk);
+                    } else {
+                        uc.get_data_mut().keys[vk] = false;
+                    }
                     uc.get_data_mut().cursor = (x, y);
                     post(uc, m, 0, ((y as u32) << 16) | (x as u32 & 0xffff));
                 }
@@ -203,6 +221,23 @@ impl Frontend {
                     let w = self.canvas.window_mut();
                     let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;
                     let _ = w.set_fullscreen(if full { sdl2::video::FullscreenType::Off } else { sdl2::video::FullscreenType::Desktop });
+                }
+                Event::KeyDown { keycode: Some(Keycode::W), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
+                    self.wasd = !self.wasd;
+                    uc.get_data_mut().ui.toast(if self.wasd { "WASD ROLA O MAPA" } else { "WASD DESLIGADO" });
+                }
+                // The game polls the arrow keys for scrolling, so WASD only has to set their state.
+                Event::KeyDown { keycode: Some(k @ (Keycode::W | Keycode::A | Keycode::S | Keycode::D)), .. }
+                | Event::KeyUp { keycode: Some(k @ (Keycode::W | Keycode::A | Keycode::S | Keycode::D)), .. }
+                    if self.wasd =>
+                {
+                    let vk = match k {
+                        Keycode::W => 0x26,
+                        Keycode::A => 0x25,
+                        Keycode::S => 0x28,
+                        _ => 0x27,
+                    };
+                    uc.get_data_mut().keys[vk] = matches!(e, Event::KeyDown { .. });
                 }
                 Event::KeyDown { keycode: Some(k), repeat, .. } | Event::KeyUp { keycode: Some(k), repeat, .. } => {
                     let down = matches!(e, Event::KeyDown { .. });
