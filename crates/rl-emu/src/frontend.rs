@@ -60,6 +60,8 @@ pub struct Frontend {
     movie_tex: Option<Texture<'static>>,
     /// Text being typed in the host-address prompt, when it is open.
     prompt: Option<String>,
+    /// The open prompt is the debug console (F12) rather than the host-address one.
+    console: bool,
     last_frame: Option<(u32, u32, Vec<u8>)>,
     was_overlay: bool,
     /// Buttons pressed during this event pass, and releases held back one pass so that a quick
@@ -138,7 +140,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -148,6 +150,7 @@ impl Frontend {
             activate(uc);
         }
         if uc.get_data().ui.want_host_address && self.prompt.is_none() {
+            self.console = false;
             uc.get_data_mut().ui.want_host_address = false;
             self.prompt = Some(uc.get_data().ui.last_host.clone());
         }
@@ -160,14 +163,20 @@ impl Frontend {
             // While the prompt is open it gets all the keyboard input.
             if let Some(text) = self.prompt.as_mut() {
                 match &e {
-                    Event::TextInput { text: t, .. } => text.extend(t.chars().filter(|c| c.is_ascii_alphanumeric() || ".:-_[]".contains(*c))),
+                    Event::TextInput { text: t, .. } => {
+                        let console = self.console;
+                        text.extend(t.chars().filter(|c| c.is_ascii_alphanumeric() || ".:-_[]".contains(*c) || (console && *c == ' ')))
+                    }
                     Event::KeyDown { keycode: Some(Keycode::Backspace), .. } => {
                         text.pop();
                     }
                     Event::KeyDown { keycode: Some(Keycode::Return | Keycode::KpEnter), .. } => {
                         let t = text.trim().to_string();
                         self.prompt = None;
-                        if !t.is_empty() {
+                        if self.console {
+                            let r = crate::debug::run(uc, &t);
+                            uc.get_data_mut().ui.toast(r);
+                        } else if !t.is_empty() {
                             uc.get_data_mut().ui.last_host = t.clone();
                             uc.get_data_mut().ui.submitted_host = Some(t);
                         }
@@ -182,6 +191,11 @@ impl Frontend {
                 if !matches!(e, Event::Quit { .. }) {
                     continue;
                 }
+            }
+            if let Event::KeyDown { keycode: Some(Keycode::F12), repeat: false, .. } = e {
+                self.console = true;
+                self.prompt = Some(String::new());
+                continue;
             }
             match e {
                 Event::Quit { .. } => return false,
@@ -339,7 +353,7 @@ impl Frontend {
         }
         let stride = w as usize;
         if let Some(text) = &self.prompt {
-            let label = "ENDERECO DO ANFITRIAO (IP OU IP:PORTA) - ENTER CONFIRMA, ESC CANCELA";
+            let label = if self.console { "CONSOLE - ENTER EXECUTA, ESC FECHA (AJUDA: help)" } else { "ENDERECO DO ANFITRIAO (IP OU IP:PORTA) - ENTER CONFIRMA, ESC CANCELA" };
             let line = format!("{text}_");
             let bw = (overlay::text_width(label, 2) + 24).min(stride - 8);
             let (bx, by) = ((stride - bw) / 2, h as usize / 2 - 30);

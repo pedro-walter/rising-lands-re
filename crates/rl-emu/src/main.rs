@@ -2,6 +2,7 @@
 
 mod audio;
 mod com;
+mod debug;
 mod dplay;
 mod net;
 mod overlay;
@@ -100,6 +101,23 @@ fn run_script_step(m: &mut machine::Machine, st: &Step) -> bool {
                 }
             }
         }
+        // Debug: `find a,b` lists guest addresses holding the u16/u32 value `a` with `b` within the next 16 bytes (decimal).
+        "find" => {
+            let (a, b) = xy(&st.arg);
+            for (lo, hi) in uc.mem_regions().unwrap_or_default().iter().map(|r| (r.begin, r.end)) {
+                let Ok(buf) = uc.mem_read_as_vec(lo, (hi - lo + 1) as usize) else { continue };
+                for w in [2usize, 4] {
+                    let g = |i: usize| (0..w).fold(0i64, |v, k| v | (buf[i + k] as i64) << (8 * k));
+                    for i in (0..buf.len().saturating_sub(24)).step_by(w) {
+                        if g(i) == a as i64 && (w..=16).step_by(w).any(|d| g(i + d) == b as i64) {
+                            eprintln!("[find] u{} at {:#x}", w * 8, lo + i as u64);
+                        }
+                    }
+                }
+            }
+        }
+        // Debug console command (see debug.rs).
+        "dbg" => eprintln!("[dbg] {}", debug::run(uc, &st.arg)),
         "quit" => return false,
         other => eprintln!("script: unknown command {other}"),
     }
