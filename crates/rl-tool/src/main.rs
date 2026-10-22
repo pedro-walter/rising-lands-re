@@ -5,7 +5,7 @@ use std::{env, error::Error, fs, fs::File, io::BufWriter, path::Path, process::E
 
 const USAGE: &str = "\
 usage:
-  rl-tool disc <image.bin> <out-dir>     extract game files from a BIN/CUE image
+  rl-tool disc <image.bin> <out-dir>     extract game files and CD audio from a BIN/CUE image
   rl-tool dump <game-dir> <out-dir>      convert screens and sprites to PNG
                                          (<game-dir> is the INSTALHD folder)
   rl-tool map <game-dir> <file.eta> <out.png> [x y w h]
@@ -38,8 +38,16 @@ fn main() -> ExitCode {
 }
 
 fn cmd_disc(bin: &Path, out: &Path) -> Res {
-    let n = disc::Disc::open(bin)?.extract(out, &["DIRECTX"])?;
+    let disc = disc::Disc::open(bin)?;
+    let n = disc.extract(out, &["DIRECTX"])?;
     println!("extracted {n} files to {}", out.display());
+    // CD audio tracks come from the CUE sheet next to the image.
+    let cue = bin.with_extension("CUE");
+    let cue = if cue.exists() { cue } else { bin.with_extension("cue") };
+    if cue.exists() {
+        let t = disc.extract_audio(&cue, out)?;
+        println!("extracted {t} audio tracks");
+    }
     Ok(())
 }
 

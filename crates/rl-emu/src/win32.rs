@@ -358,9 +358,10 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
         }
         "DeleteFileA" => {
             let p = rd_cstr(uc, a[0]);
+            // Only files the game itself created (in the overlay) can be deleted.
             match uc.get_data().vfs.resolve(&p) {
-                Some(h) => std::fs::remove_file(h).is_ok() as u32,
-                None => 0,
+                Some(h) if h.starts_with(&uc.get_data().vfs.overlay) => std::fs::remove_file(h).is_ok() as u32,
+                _ => 0,
             }
         }
         "FindFirstFileA" => {
@@ -443,7 +444,10 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
             _ => 0,
         },
         "GetCursorPos" => {
+            // Always inside the 800x600 screen: the original indexed tables with the raw cursor
+            // position and crashed when it came back from outside the window (archer bug).
             let (x, y) = uc.get_data().cursor;
+            let (x, y) = (x.clamp(0, 799), y.clamp(0, 599));
             wr32(uc, a[0], x as u32);
             wr32(uc, a[0] + 4, y as u32);
             1
@@ -683,23 +687,59 @@ fn mci_string(uc: &mut Uc, cmd: &str, ret: u32, ret_len: u32) -> u32 {
 }
 
 /// MCI commands for AVI playback (the intro, victory and defeat movies).
-/// Movies are not decoded yet: they "play" and finish immediately so the game carries on.
 fn mci_command(uc: &mut Uc, device: u32, msg: u32, flags: u32, params: u32) -> u32 {
     if uc.get_data().log_calls {
         eprintln!("[mci] command dev={device} msg={msg:#x} flags={flags:#x} params={params:#x}");
     }
     match msg {
         0x803 => {
-            // MCI_OPEN: report device id 1.
+            // MCI_OPEN: dwStyle/hWnd are ignored; the element name is a path on the guest file system.
+            let name = rd_cstr(uc, rd32(uc, params + 12));
+            if uc.get_data().log_calls {
+                eprintln!("[mci] open movie {name:?}");
+            }
+            let Some(host) = uc.get_data().vfs.resolve(&name) else {
+                eprintln!("[mci] movie not found: {name:?}");
+                wr32(uc, params + 4, 1);
+                return 0; // let the game carry on without the movie
+            };
+            match std::fs::read(&host).map_err(|e| e.to_string()).and_then(|b| crate::video::Avi::parse(&b)) {
+                Ok(avi) => uc.get_data_mut().video_open = Some(avi),
+                Err(e) => eprintln!("[mci] cannot open {name:?}: {e}"),
+            }
             wr32(uc, params + 4, 1);
             0
         }
-        0x814 => {
-            // MCI_STATUS: dwItem at +8; for MCI_STATUS_MODE report "stopped".
-            wr32(uc, params + 4, 0x20d);
+        0x806 => {
+            // MCI_PLAY: start the movie and its sound track.
+            if let Some(avi) = uc.get_data_mut().video_open.take() {
+                let mut voice = crate::audio::Voice::new(0);
+                voice.data = avi.audio.iter().flat_map(|s| s.to_le_bytes()).collect();
+                voice.channels = avi.channels.max(1);
+                voice.rate = avi.sample_rate;
+                voice.bits = 16;
+                voice.playing = !voice.data.is_empty();
+                uc.get_data().mixer.lock().unwrap().voices.insert(VIDEO_VOICE, voice);
+                uc.get_data_mut().video = Some(crate::video::Player::new(avi));
+            }
             0
         }
-        0x841 | 0x806 | 0x804 | 0x842 => 0,
+        0x814 => {
+            // MCI_STATUS (item = mode): 0x20e playing, 0x20d stopped.
+            let playing = uc.get_data().video.as_ref().is_some_and(|v| !v.finished);
+            wr32(uc, params + 4, if playing { 0x20e } else { 0x20d });
+            0
+        }
+        0x804 => {
+            // MCI_CLOSE
+            uc.get_data_mut().video = None;
+            uc.get_data_mut().video_open = None;
+            uc.get_data().mixer.lock().unwrap().voices.remove(&VIDEO_VOICE);
+            0
+        }
+        0x841 | 0x842 => 0,
         _ => 0,
     }
 }
+
+const VIDEO_VOICE: u32 = 0xfff0;

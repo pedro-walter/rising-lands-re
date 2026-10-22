@@ -70,6 +70,9 @@ pub struct State {
     pub tls: Vec<u32>,
     pub last_error: u32,
     pub com: com::Com,
+    /// AVI opened through MCI, and the movie currently playing (if any).
+    pub video_open: Option<crate::video::Avi>,
+    pub video: Option<crate::video::Player>,
     pub mixer: crate::audio::Shared,
     /// Track files for CD audio (`trackNN.raw` in the disc root).
     pub cd_tracks: HashMap<u32, std::sync::Arc<Vec<u8>>>,
@@ -203,7 +206,7 @@ pub fn wr_cstr(uc: &mut Uc, addr: u32, s: &str, cap: usize) -> usize {
 }
 
 impl Machine {
-    pub fn new(exe: &Path, install: &Path, disc: &Path) -> Result<Machine, Box<dyn Error>> {
+    pub fn new(exe: &Path, install: &Path, disc: &Path, userdir: &Path) -> Result<Machine, Box<dyn Error>> {
         let bytes = std::fs::read(exe)?;
         let img = pe::load(&bytes)?;
         let state = State {
@@ -215,7 +218,7 @@ impl Machine {
             skip_once: None,
             last_hooked: None,
             frames: Vec::new(),
-            vfs: Vfs::new(install.to_path_buf(), disc.to_path_buf()),
+            vfs: Vfs::new(install.to_path_buf(), disc.to_path_buf(), userdir.to_path_buf()),
             classes: HashMap::new(),
             windows: Vec::new(),
             msgs: VecDeque::new(),
@@ -224,6 +227,8 @@ impl Machine {
             tls: vec![0; 64],
             last_error: 0,
             com: com::Com::default(),
+            video_open: None,
+            video: None,
             mixer: Default::default(),
             cd_tracks: HashMap::new(),
             cd_format_tmsf: false,

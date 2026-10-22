@@ -36,6 +36,7 @@ pub struct Frontend {
     events: EventPump,
     shown: u64,
     sent_activate: bool,
+    movie_tex: Option<Texture<'static>>,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -95,7 +96,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, _creator: creator, events, shown: 0, sent_activate: false })
+        Ok(Frontend { _sdl: sdl, canvas, tex, _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -153,6 +154,19 @@ impl Frontend {
 
     /// Uploads and shows the primary surface if the guest presented a new frame.
     pub fn present(&mut self, uc: &mut Uc) {
+        // A movie takes over the whole window while it plays.
+        if let Some(v) = uc.get_data_mut().video.as_mut() {
+            if v.dirty {
+                v.dirty = false;
+                let (w, h) = (v.avi.width as u32, v.avi.height as u32);
+                let tex = self.movie_tex.get_or_insert_with(|| self._creator.create_texture_streaming(PixelFormatEnum::RGB24, w, h).expect("movie texture"));
+                let _ = tex.update(None, &v.dec.rgb, w as usize * 3);
+                self.canvas.clear();
+                let _ = self.canvas.copy(tex, None, None);
+                self.canvas.present();
+            }
+            return;
+        }
         let n = uc.get_data().com.frames_presented;
         if n == self.shown {
             return;

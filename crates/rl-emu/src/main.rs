@@ -6,6 +6,7 @@ mod frontend;
 mod machine;
 mod pe;
 mod vfs;
+mod video;
 mod win32;
 
 use std::{env, path::PathBuf, process::ExitCode};
@@ -77,15 +78,54 @@ fn run_script_step(m: &mut machine::Machine, st: &Step) -> bool {
     true
 }
 
+/// Where saved games and other writable files live.
+fn userdir() -> PathBuf {
+    if let Some(d) = env::var_os("RL_USERDIR") {
+        return PathBuf::from(d);
+    }
+    let home = |rel: &str| env::var_os("HOME").map(|h| PathBuf::from(h).join(rel));
+    let base = if cfg!(windows) {
+        env::var_os("APPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        home("Library/Application Support")
+    } else {
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from).or_else(|| home(".local/share"))
+    };
+    base.unwrap_or_else(|| PathBuf::from(".")).join("rising-lands")
+}
+
+/// Debug helper: `rl-emu --avi movie.avi out_prefix first count` writes decoded frames as PNGs.
+fn dump_avi(args: &[String]) -> ExitCode {
+    let bytes = std::fs::read(&args[1]).expect("read avi");
+    let avi = video::Avi::parse(&bytes).expect("parse avi");
+    eprintln!("{}x{} {} frames rate {:?} audio {} samples {}ch {}Hz", avi.width, avi.height, avi.frames.len(), avi.rate, avi.audio.len(), avi.channels, avi.sample_rate);
+    let (first, count): (usize, usize) = (args[3].parse().unwrap_or(0), args[4].parse().unwrap_or(1));
+    let mut dec = video::Cinepak::new(avi.width, avi.height);
+    for (i, f) in avi.frames.iter().enumerate().take(first + count) {
+        dec.decode(f).expect("decode");
+        if i >= first {
+            let file = std::fs::File::create(format!("{}{i:04}.png", args[2])).expect("png");
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(file), avi.width as u32, avi.height as u32);
+            enc.set_color(png::ColorType::Rgb);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().and_then(|mut w| w.write_image_data(&dec.rgb)).expect("write");
+        }
+    }
+    ExitCode::SUCCESS
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("--avi") && args.len() >= 5 {
+        return dump_avi(&args);
+    }
     let (Some(install), Some(disc)) = (args.first(), args.get(1)) else {
         eprintln!("usage: rl-emu <INSTALHD dir> <disc root dir>");
         return ExitCode::from(2);
     };
     let install = PathBuf::from(install);
     let disc = PathBuf::from(disc);
-    let mut m = match machine::Machine::new(&install.join("RISING.EXE"), &install, &disc) {
+    let mut m = match machine::Machine::new(&install.join("RISING.EXE"), &install, &disc, &userdir()) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: {e}");
@@ -122,6 +162,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         }
+        video_tick(&mut m);
         match m.step(8_000) {
             Ok(Some(code)) => {
                 eprintln!("guest exited with {code}");
@@ -153,7 +194,8 @@ fn main() -> ExitCode {
 
 fn dump(m: &mut machine::Machine, shot: Option<&str>) {
     let Some(path) = shot else { return };
-    match com::snapshot(&mut m.uc) {
+    let video = m.uc.get_data().video.as_ref().map(|v| (v.avi.width as u32, v.avi.height as u32, v.dec.rgb.chunks(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect::<Vec<u8>>()));
+    match video.or_else(|| com::snapshot(&mut m.uc)) {
         Some((w, h, rgba)) => {
             let f = std::fs::File::create(path).expect("create png");
             let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
@@ -164,4 +206,11 @@ fn dump(m: &mut machine::Machine, shot: Option<&str>) {
         }
         None => eprintln!("no primary surface to dump"),
     }
+}
+
+/// Advances the movie that is playing, if any, and ends its audio when it is done.
+fn video_tick(m: &mut machine::Machine) {
+    let st = m.uc.get_data_mut();
+    let Some(v) = st.video.as_mut() else { return };
+    v.tick();
 }

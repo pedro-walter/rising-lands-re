@@ -28,6 +28,16 @@ impl Disc {
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "sector beyond image"))
     }
 
+    fn sector_count(&self) -> usize {
+        self.raw.len() / RAW
+    }
+
+    fn raw_sector(&self, lba: usize) -> io::Result<&[u8]> {
+        self.raw
+            .get(lba * RAW..(lba + 1) * RAW)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "sector beyond image"))
+    }
+
     fn read(&self, lba: usize, len: usize) -> io::Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);
         let mut s = lba;
@@ -88,6 +98,43 @@ impl Disc {
                 fs::write(out.join(&e.name), self.read(e.lba, e.len)?)?;
                 n += 1;
             }
+        }
+        Ok(n)
+    }
+
+    /// Writes each CD audio track named in a CUE sheet as `trackNN.raw` (44.1 kHz, 16-bit,
+    /// stereo, little endian). Track lengths follow the table of contents, i.e. they run up to
+    /// the next track's INDEX 01, like the lengths Windows reports for an audio CD.
+    pub fn extract_audio(&self, cue: &Path, out: &Path) -> io::Result<usize> {
+        let text = fs::read_to_string(cue)?;
+        // (track number, is_audio, INDEX 01 sector)
+        let mut tracks: Vec<(u32, bool, usize)> = Vec::new();
+        for line in text.lines().map(str::trim) {
+            let mut w = line.split_whitespace();
+            match (w.next(), w.next(), w.next()) {
+                (Some("TRACK"), Some(n), Some(kind)) => tracks.push((n.parse().unwrap_or(0), kind == "AUDIO", 0)),
+                (Some("INDEX"), Some("01"), Some(msf)) => {
+                    let p: Vec<usize> = msf.split(':').filter_map(|v| v.parse().ok()).collect();
+                    if let (Some(t), [m, s, f]) = (tracks.last_mut(), p.as_slice()) {
+                        t.2 = (m * 60 + s) * 75 + f;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let total = self.sector_count();
+        let mut n = 0;
+        for (i, &(num, audio, start)) in tracks.iter().enumerate() {
+            if !audio {
+                continue;
+            }
+            let end = tracks.get(i + 1).map_or(total, |t| t.2);
+            let mut data = Vec::with_capacity((end - start) * 2352);
+            for lba in start..end {
+                data.extend_from_slice(self.raw_sector(lba)?);
+            }
+            fs::write(out.join(format!("track{num:02}.raw")), data)?;
+            n += 1;
         }
         Ok(n)
     }

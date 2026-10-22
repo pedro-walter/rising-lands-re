@@ -10,6 +10,8 @@ use std::{
 };
 
 pub struct Vfs {
+    /// Writable per-user directory layered over `C:`: saves and settings go here.
+    pub overlay: PathBuf,
     pub install: PathBuf,
     pub disc: PathBuf,
     /// Current directory, as an absolute Windows path (`C:\RISING`).
@@ -34,8 +36,8 @@ fn pattern_match(pat: &[u8], name: &[u8]) -> bool {
 }
 
 impl Vfs {
-    pub fn new(install: PathBuf, disc: PathBuf) -> Vfs {
-        Vfs { install, disc, cwd: "C:\\RISING".into(), files: HashMap::new(), next_handle: 0x100 }
+    pub fn new(install: PathBuf, disc: PathBuf, overlay: PathBuf) -> Vfs {
+        Vfs { overlay, install, disc, cwd: "C:\\RISING".into(), files: HashMap::new(), next_handle: 0x100 }
     }
 
     /// Splits a Windows path into (drive letter, components) after applying the cwd.
@@ -63,46 +65,55 @@ impl Vfs {
         (drive, comps)
     }
 
-    /// Resolves a Windows path to an existing host path.
-    pub fn resolve(&self, path: &str) -> Option<PathBuf> {
-        let (drive, comps) = self.normalize(path);
-        let mut cur = match drive {
-            'C' => self.install.clone(),
-            'D' => self.disc.clone(),
-            _ => return None,
-        };
-        // `C:\RISING` is the install dir itself.
-        let skip = usize::from(drive == 'C' && comps.first().is_some_and(|c| c.eq_ignore_ascii_case("RISING")));
-        for c in &comps[skip..] {
+    fn walk(root: &Path, comps: &[String]) -> Option<PathBuf> {
+        let mut cur = root.to_path_buf();
+        for c in comps {
             cur = lookup(&cur, c)?;
         }
         Some(cur)
     }
 
-    /// Resolves a path whose last component may not exist yet (for creating files).
-    pub fn resolve_new(&self, path: &str) -> Option<PathBuf> {
-        if let Some(p) = self.resolve(path) {
-            return Some(p);
-        }
+    /// Resolves a Windows path to an existing host path (the per-user overlay wins over `C:`).
+    pub fn resolve(&self, path: &str) -> Option<PathBuf> {
         let (drive, comps) = self.normalize(path);
-        let (last, dir) = comps.split_last()?;
-        let mut cur = match drive {
-            'C' => self.install.clone(),
-            _ => return None,
-        };
-        let skip = usize::from(dir.first().is_some_and(|c| c.eq_ignore_ascii_case("RISING")));
-        for c in &dir[skip..] {
-            cur = lookup(&cur, c)?;
+        match drive {
+            'C' => {
+                // `C:\RISING` is the install dir itself.
+                let skip = usize::from(comps.first().is_some_and(|c| c.eq_ignore_ascii_case("RISING")));
+                Self::walk(&self.overlay, &comps[skip..]).or_else(|| Self::walk(&self.install, &comps[skip..]))
+            }
+            'D' => Self::walk(&self.disc, &comps),
+            _ => None,
         }
-        Some(cur.join(last))
+    }
+
+    /// Host path in the overlay for a `C:` path, creating parent directories.
+    fn overlay_path(&self, path: &str) -> Option<PathBuf> {
+        let (drive, comps) = self.normalize(path);
+        if drive != 'C' {
+            return None;
+        }
+        let skip = usize::from(comps.first().is_some_and(|c| c.eq_ignore_ascii_case("RISING")));
+        let comps = &comps[skip..];
+        let (last, dir) = comps.split_last()?;
+        let mut cur = self.overlay.clone();
+        for c in dir {
+            cur = lookup(&cur, c).unwrap_or_else(|| cur.join(c));
+        }
+        fs::create_dir_all(&cur).ok()?;
+        Some(lookup(&cur, last).unwrap_or_else(|| cur.join(last)))
     }
 
     pub fn open(&mut self, path: &str, write: bool, create: bool) -> Option<u32> {
-        let host = if create { self.resolve_new(path)? } else { self.resolve(path)? };
         let f = if write || create {
-            fs::OpenOptions::new().read(true).write(true).create(create).truncate(create).open(host).ok()?
+            let dst = self.overlay_path(path)?;
+            if !dst.exists() && !create {
+                // Copy-on-write: start from the installed file.
+                fs::copy(self.resolve(path)?, &dst).ok()?;
+            }
+            fs::OpenOptions::new().read(true).write(true).create(create).truncate(create).open(dst).ok()?
         } else {
-            File::open(host).ok()?
+            File::open(self.resolve(path)?).ok()?
         };
         let h = self.next_handle;
         self.next_handle += 4;
@@ -122,11 +133,22 @@ impl Vfs {
         let p = pattern.replace('/', "\\");
         let (dir, pat) = p.rsplit_once('\\').unwrap_or((".", &p));
         let dir = if dir.is_empty() { "\\" } else { dir };
-        let mut entries = Vec::new();
-        if let Some(d) = self.resolve(dir) {
+        let mut entries: Vec<PathBuf> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let (drive, comps) = self.normalize(dir);
+        let mut dirs = Vec::new();
+        if drive == 'C' {
+            let skip = usize::from(comps.first().is_some_and(|c| c.eq_ignore_ascii_case("RISING")));
+            dirs.extend(Self::walk(&self.overlay, &comps[skip..]));
+            dirs.extend(Self::walk(&self.install, &comps[skip..]));
+        } else {
+            dirs.extend(self.resolve(dir));
+        }
+        for d in dirs {
             if let Ok(rd) = fs::read_dir(d) {
                 for e in rd.flatten() {
-                    if pattern_match(pat.as_bytes(), e.file_name().to_string_lossy().as_bytes()) {
+                    let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                    if pattern_match(pat.as_bytes(), name.as_bytes()) && seen.insert(name) {
                         entries.push(e.path());
                     }
                 }
