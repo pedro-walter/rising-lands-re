@@ -81,39 +81,32 @@ pub fn draw_text(rgba: &mut [u8], stride_px: usize, x: usize, y: usize, text: &s
     }
 }
 
-/// A small arrow pointer (white, black outline) with its tip at (x, y).
+/// The game's own pointer (14x14, 0 = transparent), captured from its rendering, tip at the top-left.
+const CURSOR: [u32; 14 * 14] = [
+    0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0, 0,
+    0xff101010, 0xfffcfcfc, 0xffe0e0e0, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xff101010, 0, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xff989898, 0xff101010, 0xff101010, 0xff101010, 0xff101010,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xff989898, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xff989898, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffb0b0b0, 0xff989898, 0xff545454, 0xff101010, 0xff101010, 0xff101010, 0, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffb0b0b0, 0xff989898, 0xff686868, 0xff101010, 0, 0, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffe0e0e0, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffb0b0b0, 0xff989898, 0xff686868, 0xff101010, 0, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xffcccccc, 0xffb0b0b0, 0xff989898, 0xff101010, 0xff101010, 0,
+    0xff101010, 0xfffcfcfc, 0xffcccccc, 0xff101010, 0xff101010, 0xff101010, 0xfffcfcfc, 0xffcccccc, 0xffcccccc, 0xff989898, 0xff101010, 0xff101010, 0xff101010, 0xff101010,
+    0xff101010, 0xffe0e0e0, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xfffcfcfc, 0xffb0b0b0, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010,
+    0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0,
+    0, 0, 0xff101010, 0xff101010, 0xff101010, 0, 0, 0, 0xff101010, 0xff101010, 0xff101010, 0xff101010, 0, 0,
+    0, 0, 0xff101010, 0xff101010, 0, 0, 0, 0, 0, 0xff101010, 0xff101010, 0, 0, 0,
+];
+
+/// Draws the pointer with its tip at (x, y).
 pub fn draw_arrow(rgba: &mut [u8], w: usize, h: usize, x: i32, y: i32) {
-    const A: [&str; 16] = [
-        "X",
-        "XX",
-        "X.X",
-        "X..X",
-        "X...X",
-        "X....X",
-        "X.....X",
-        "X......X",
-        "X.......X",
-        "X....XXXXX",
-        "X..X..X",
-        "X.X X..X",
-        "XX  X..X",
-        "X    X..X",
-        "     X..X",
-        "      XX",
-    ];
-    for (j, row) in A.iter().enumerate() {
-        for (i, c) in row.bytes().enumerate() {
-            let (px, py) = (x + i as i32, y + j as i32);
-            if px < 0 || py < 0 || px as usize >= w || py as usize >= h {
-                continue;
-            }
-            let col = match c {
-                b'X' => [0, 0, 0, 255],
-                b'.' => [255, 255, 255, 255],
-                _ => continue,
-            };
-            let o = (py as usize * w + px as usize) * 4;
-            rgba[o..o + 4].copy_from_slice(&col);
+    for (k, &c) in CURSOR.iter().enumerate() {
+        let (px, py) = (x + (k % 14) as i32, y + (k / 14) as i32);
+        if c == 0 || px < 0 || py < 0 || px as usize >= w || py as usize >= h {
+            continue;
         }
+        let o = (py as usize * w + px as usize) * 4;
+        rgba[o..o + 4].copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]);
     }
 }
