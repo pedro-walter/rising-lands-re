@@ -26,7 +26,7 @@ fn set_u16(uc: &mut Uc, addr: u32, v: u16) {
     wr_bytes(uc, addr, &v.to_le_bytes());
 }
 
-pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | snap | diff | help";
+pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | snap | diff | help";
 
 /// Memory snapshot taken by `snap`, for `diff` (region start, bytes).
 static SNAP: std::sync::Mutex<Vec<(u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
@@ -167,6 +167,48 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
                 eprintln!("[ent] {i} owner={} state={} type={} tile=({},{})", mem[o + 4], mem[o + 5], mem[o + 8], tile & 0xff, tile >> 8);
             }
             format!("{n} ENTIDADES, PRIMEIRO LIVRE: {first_free:?}")
+        }
+        // `spawn <type 0-25> [x y] [player]`: create a unit the way a finished training does.
+        ["spawn", args @ ..] => {
+            let n: Vec<u32> = args.iter().filter_map(|a| a.parse().ok()).collect();
+            let Some(&ty) = n.first().filter(|&&t| t < 26) else { return "USO: spawn <tipo 0-25> [x y] [jogador]".into() };
+            let player = n.get(3).copied().unwrap_or(0);
+            let (x, y) = if n.len() >= 3 {
+                (n[1], n[2])
+            } else {
+                // Next to the first building when no tile is given.
+                let t = u16::from_le_bytes([rd_bytes(uc, BLD_TABLE + 2, 2)[0], rd_bytes(uc, BLD_TABLE + 3, 2)[0]]) as u32;
+                ((t & 0xff) + 2, (t >> 8) + 4)
+            };
+            let base = rd32(uc, 0x4e19a0);
+            let Some(slot) = (1..800u32).find(|&i| rd_bytes(uc, base + i * 0x114 + 2, 1)[0] == 0) else { return "SEM ESPACO NA TABELA".into() };
+            let rec = base + slot * 0x114;
+            wr_bytes(uc, rec, &[player as u8]);
+            wr_bytes(uc, rec + 2, &[7]);
+            let tile = (y << 8) | x;
+            for (f, regs) in [(0x457b87, [slot, tile, 0, ty]), (0x457122, [slot, 1000, 0, 0]), (0x4530fd, [slot, 0, 0, 0]), (0x44fe42, [slot, tile, 0, 0]), (0x445fbc, [slot, tile, 0, 0])] {
+                let r = call_guest(uc, f, regs, &[]);
+                if let Err(e) = r {
+                    return format!("ERRO EM {f:#x}: {e}");
+                }
+            }
+            format!("UNIDADE {ty} CRIADA NO SLOT {slot} EM ({x},{y})")
+        }
+        // `tab <hex addr> <stride> <count> [deref]`: dump the non-empty records of a table (deref: the address holds a pointer).
+        ["tab", a, stride, count, rest @ ..] => {
+            let (Some(mut a), Ok(stride), Ok(count)) = (hex(a), stride.parse::<usize>(), count.parse::<usize>()) else { return "USO: tab <addr> <tamanho> <n> [deref]".into() };
+            if !rest.is_empty() {
+                a = rd32(uc, a);
+            }
+            let mem = rd_bytes(uc, a, stride * count);
+            let mut n = 0;
+            for (i, rec) in mem.chunks(stride).enumerate() {
+                if rec.iter().any(|&b| b != 0 && b != 0xff) {
+                    n += 1;
+                    eprintln!("[tab] {i}: {rec:02x?}");
+                }
+            }
+            format!("{n} REGISTROS EM {a:#x}")
         }
         ["instant", rest @ ..] => {
             let on = !matches!(rest.first(), Some(&"off"));

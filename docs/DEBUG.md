@@ -8,6 +8,8 @@ Press **F12** in the window to open the console (Enter runs, Esc closes). From s
 | `res` | show the stockpile; `res <metal\|comida\|pedra\|all> <n> [player]` sets it |
 | `instant [on\|off]` | buildings finish the moment a builder starts them |
 | `tech` | researched count per area; `tech <agricultura\|militar\|civil\|religiao> <n> [player]` researches up to `n` (applies each effect through the game's own function) |
+| `spawn <type 0-25> [x y] [player]` | creates a unit (default: next to the first building) by calling the game's own unit init |
+| `tab <addr> <stride> <n> [deref]` | dump the non-empty records of a table |
 | `ents` | list the entity table (buildings) |
 | `peek <hex> [n]`, `poke <hex> <v> [1\|2\|4]` | read/write guest memory |
 | `snap`, `diff`, `diff up` | memory snapshot and what changed since (`up`: u16 words that grew, re-arms itself) |
@@ -27,4 +29,6 @@ Script commands: `dbg`, `find a,b`, `mem addr:len`, `bld`.
   `FUN_00470f98(AL=player, EDX=item, BX=area, ECX=1)` applies an item's effect.
 * Unit stats from `RISING.INI`: 0x32-byte records at `0x4965ae` (26 unit types); recruit time at +0.
 * Game speed/menus: screen id byte at `0x4e2f78`, frame counter `0x508f7c`.
-* Not found yet: where trained units live (spawning).
+* Units: pointer at `0x4e19a0` to 0x114-byte records (slot 0 unused). +0 owner, +1 type (0-25), +2 state (7 idle), +8/+0x7c/+0x7e tile (`y<<8|x`).
+  `FUN_00457b87(EAX=slot, EDX=tile, CL=type)` initialises a unit; training completion (`FUN_00420e4c`) then calls `0x457122`, `0x4530fd`, `0x44fe42`, `0x445fbc(EAX=slot, EDX=tile)`.
+* Building training: +0x74 active flag, +0x7a queue, +0x8c progress (done at recruit time * 100).
