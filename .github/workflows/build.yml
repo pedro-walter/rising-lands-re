@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-13, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build tools and emulator
+        run: cargo build --release -p rl-tool -p rl-emu
+      - name: Unit tests (no game data needed)
+        run: cargo test --release -p rl-emu -p rl-assets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rising-lands-${{ matrix.os }}
+          path: |
+            target/release/rl-emu
+            target/release/rl-emu.exe
+            target/release/rl-tool
+            target/release/rl-tool.exe
+          if-no-files-found: ignore

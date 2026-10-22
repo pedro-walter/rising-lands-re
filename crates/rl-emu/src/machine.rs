@@ -72,6 +72,10 @@ pub struct State {
     pub heap_next: u32,
     pub heap_sizes: HashMap<u32, u32>,
     pub heap_free: std::collections::BTreeMap<u32, u32>,
+    /// Freed blocks wait here before they can be reused: the game touches some memory after
+    /// freeing it, which Windows 9x tolerated.
+    pub heap_quarantine: std::collections::VecDeque<(u32, u32)>,
+    pub heap_quarantine_bytes: u64,
     pub pending: Option<Action>,
     pub skip_once: Option<u32>,
     /// Stub whose host handler just ran; a timeout can stop the CPU before the stub's `ret`.
@@ -129,7 +133,21 @@ impl State {
     }
 
     pub fn free(&mut self, addr: u32) {
+        if std::env::var_os("RL_NOFREE").is_some() {
+            return;
+        }
         let Some(size) = self.heap_sizes.remove(&addr) else { return };
+        self.heap_quarantine.push_back((addr, size));
+        self.heap_quarantine_bytes += size as u64;
+        // Release the oldest blocks once 64 MB are waiting.
+        while self.heap_quarantine_bytes > 64 << 20 {
+            let Some((a, sz)) = self.heap_quarantine.pop_front() else { break };
+            self.heap_quarantine_bytes -= sz as u64;
+            self.release(a, sz);
+        }
+    }
+
+    fn release(&mut self, addr: u32, size: u32) {
         let (mut start, mut len) = (addr, size);
         if let Some((&pa, &ps)) = self.heap_free.range(..addr).next_back() {
             if pa + ps == addr {
@@ -231,6 +249,8 @@ impl Machine {
             heap_next: HEAP_BASE,
             heap_sizes: HashMap::new(),
             heap_free: Default::default(),
+            heap_quarantine: Default::default(),
+            heap_quarantine_bytes: 0,
             pending: None,
             skip_once: None,
             last_hooked: None,
@@ -314,12 +334,16 @@ impl Machine {
 
         uc.add_code_hook(STUB_BASE as u64, (STUB_BASE + STUB_SIZE) as u64, |uc, addr, _| on_stub(uc, addr as u32))
             .map_err(|e| format!("hook: {e:?}"))?;
-        if let Some(w) = std::env::var("RL_WATCH").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) {
-            uc.add_mem_hook(HookType::MEM_WRITE, w as u64, w as u64 + 3, move |uc, _, addr, size, val| {
-                eprintln!("[watch] write {size} at {addr:#x} = {val:#x} from eip={:#x}", reg(uc, RegisterX86::EIP));
-                true
-            })
-            .map_err(|e| format!("watch: {e:?}"))?;
+        // RL_WATCH=<hex addr>[:<len>] logs guest writes to that range (debugging aid).
+        if let Some(spec) = std::env::var("RL_WATCH").ok() {
+            let (a, l) = spec.split_once(':').unwrap_or((&spec, "4"));
+            if let (Ok(w), Ok(len)) = (u32::from_str_radix(a.trim_start_matches("0x"), 16), l.parse::<u32>()) {
+                uc.add_mem_hook(HookType::MEM_WRITE, w as u64, (w + len.max(1) - 1) as u64, move |uc, _, addr, size, val| {
+                    eprintln!("[watch] write {size} at {addr:#x} = {val:#x} from eip={:#x}", reg(uc, RegisterX86::EIP));
+                    true
+                })
+                .map_err(|e| format!("watch: {e:?}"))?;
+            }
         }
         Ok(Machine { uc, pc: img.entry })
     }
@@ -345,6 +369,22 @@ impl Machine {
             .collect();
             let esp = reg(&self.uc, RegisterX86::ESP);
             let stack: Vec<String> = (0..24).map(|i| rd32(&self.uc, esp + i * 4)).filter(|v| (0x401000..0x494000).contains(v)).map(|v| format!("{v:#x}")).collect();
+            // RL_DUMP="4e3aec:16,5080a8:4" prints guest memory (hex) when the guest faults.
+            if let Ok(spec) = std::env::var("RL_DUMP") {
+                for part in spec.split(',') {
+                    let (a, l) = part.split_once(':').unwrap_or((part, "16"));
+                    // A leading '*' follows the pointer stored at the address first.
+                    let (deref, a) = a.strip_prefix('*').map_or((false, a), |r| (true, r));
+                    if let (Ok(mut a), Ok(l)) = (u32::from_str_radix(a.trim_start_matches("0x"), 16), l.parse::<usize>()) {
+                        if deref {
+                            a = rd32(&self.uc, a);
+                        }
+                        let mut b = vec![0u8; l];
+                        let ok = self.uc.mem_read(a as u64, &mut b).is_ok();
+                        eprintln!("  dump {a:#x}+{l}: {}{}", if ok { "" } else { "(unreadable) " }, b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(" "));
+                    }
+                }
+            }
             if std::env::var_os("RL_STACKDUMP").is_some() {
                 for i in 0..48 {
                     eprintln!("  [esp+{:#x}] = {:#x}", i * 4, rd32(&self.uc, esp + i * 4));

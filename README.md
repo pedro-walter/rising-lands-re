@@ -30,7 +30,8 @@ cargo run --release -p rl-emu
 ```
 
 Keys: the game's own; `Alt+Enter` toggles fullscreen, `F11` switches 800x600 / 640x480 (the
-game's own key), `Esc` skips a movie. The first menu click plays the intro movie; press `Esc`.
+game's own key), `Ctrl +` / `Ctrl -` change the game speed (frame rate, steps of 5), `Esc` skips a
+movie. The first menu click plays the intro movie; press `Esc`.
 
 ## Multiplayer
 

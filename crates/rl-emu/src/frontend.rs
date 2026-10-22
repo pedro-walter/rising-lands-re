@@ -188,6 +188,18 @@ impl Frontend {
                     uc.get_data_mut().cursor = (x, y);
                     post(uc, m, 0, ((y as u32) << 16) | (x as u32 & 0xffff));
                 }
+                Event::KeyDown { keycode: Some(k @ (Keycode::Plus | Keycode::Equals | Keycode::KpPlus | Keycode::Minus | Keycode::KpMinus)), keymod, repeat: false, .. }
+                    if keymod.intersects(sdl2::keyboard::Mod::LCTRLMOD | sdl2::keyboard::Mod::RCTRLMOD) =>
+                {
+                    // Ctrl +/-: game speed (the loop's frame rate), in steps of 5.
+                    let st = uc.get_data_mut();
+                    let fps = (1.0 / st.frame_interval.as_secs_f64()).round() as i32;
+                    let up = matches!(k, Keycode::Plus | Keycode::Equals | Keycode::KpPlus);
+                    let fps = (fps + if up { 5 } else { -5 }).clamp(5, 120);
+                    st.frame_interval = std::time::Duration::from_secs_f64(1.0 / fps as f64);
+                    st.ui.toast(format!("VELOCIDADE: {fps} QUADROS POR SEGUNDO"));
+                    self.was_overlay = true;
+                }
                 Event::KeyDown { keycode: Some(Keycode::Return), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
                     let w = self.canvas.window_mut();
                     let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;

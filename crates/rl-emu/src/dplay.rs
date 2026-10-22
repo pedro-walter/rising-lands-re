@@ -282,6 +282,9 @@ pub fn call_method(uc: &mut Uc, name: &str, a: &[u32; 14], resume: u32) -> Optio
             wr_bytes(uc, a[4], &data);
             wr32(uc, a[1], from);
             wr32(uc, a[2], to);
+            if std::env::var_os("RL_NETLOG").is_some() {
+                eprintln!("[net] recv from={from} to={to} len={} {:02x?}", data.len(), &data[..data.len().min(24)]);
+            }
             if a[3] & 0x20 == 0 {
                 dp(uc).msgs.pop_front();
             }
@@ -290,6 +293,9 @@ pub fn call_method(uc: &mut Uc, name: &str, a: &[u32; 14], resume: u32) -> Optio
         "Send" => {
             // (this, from, to, flags, data, size)
             let data = rd_bytes(uc, a[4], a[5] as usize);
+            if std::env::var_os("RL_NETLOG").is_some() {
+                eprintln!("[net] send from={} to={} len={} {:02x?}", a[1], a[2], data.len(), &data[..data.len().min(24)]);
+            }
             dp(uc).net.send(a[1], a[2], &data);
             DP_OK
         }

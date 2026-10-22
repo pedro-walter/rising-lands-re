@@ -66,6 +66,8 @@ struct Core {
     discovering: bool,
     /// Public address learned through UPnP (shown to the host).
     pub public: Option<String>,
+    /// Client side: players that already existed when we connected are only listed, not announced.
+    initial_sync: bool,
     upnp: Option<crate::upnp::Mapping>,
 }
 
@@ -179,6 +181,7 @@ impl Net {
             extra_hosts,
             discovering: false,
             public: None,
+            initial_sync: false,
             upnp: None,
         };
         Net { core: Arc::new(Mutex::new(core)), tx, rx }
@@ -350,6 +353,7 @@ impl Net {
         {
             let mut c = self.core.lock().unwrap();
             c.joined = true;
+            c.initial_sync = true;
             c.session = info.clone();
             c.host_stream = Some(stream);
         }
@@ -575,8 +579,14 @@ fn client_reader(mut stream: TcpStream, core: Arc<Mutex<Core>>, tx: Sender<Event
                 let mut p = 0;
                 let id = get_u32(body, &mut p);
                 let name = get_str(body, &mut p);
-                core.lock().unwrap().players.push((id, name.clone(), false));
-                let _ = tx.send(Event::PlayerAdd { id, name });
+                let announce = {
+                    let mut c = core.lock().unwrap();
+                    c.players.push((id, name.clone(), false));
+                    !c.initial_sync
+                };
+                if announce {
+                    let _ = tx.send(Event::PlayerAdd { id, name });
+                }
             }
             PLAYER_DEL => {
                 let mut p = 0;
@@ -587,7 +597,9 @@ fn client_reader(mut stream: TcpStream, core: Arc<Mutex<Core>>, tx: Sender<Event
             PLAYER_ASSIGN => {
                 let mut p = 0;
                 let id = get_u32(body, &mut p);
-                if let Some(s) = core.lock().unwrap().assigned.take() {
+                let mut c = core.lock().unwrap();
+                c.initial_sync = false;
+                if let Some(s) = c.assigned.take() {
                     let _ = s.send(id);
                 }
             }
@@ -601,4 +613,51 @@ fn client_reader(mut stream: TcpStream, core: Arc<Mutex<Core>>, tx: Sender<Event
     }
     core.lock().unwrap().joined = false;
     let _ = tx.send(Event::SessionLost);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host and a client on loopback: players appear on both sides and data flows both ways.
+    #[test]
+    fn host_and_client_exchange_messages() {
+        std::env::set_var("RL_NO_UPNP", "1");
+        let host = Net::new();
+        host.host(SessionInfo { name: "test".into(), max_players: 4, ..Default::default() }).unwrap();
+        let host_player = host.create_player("alice").unwrap();
+
+        let client = Net::new();
+        let mut info = SessionInfo::default();
+        // The listener falls back to an ephemeral port when 47624 is taken; discover it by trying both.
+        let sess = host.session();
+        info.guid = sess.guid;
+        let port = [PORT].into_iter().find(|p| TcpStream::connect_timeout(&SocketAddr::new(Ipv4Addr::LOCALHOST.into(), *p), Duration::from_millis(500)).is_ok());
+        let Some(port) = port else { return }; // port busy with something else: skip
+        info.addr = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
+        client.join(&info).unwrap();
+        let client_player = client.create_player("bob").unwrap();
+        assert_ne!(host_player, client_player);
+
+        // The host learns about bob, the client about alice.
+        let ev = host.rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(ev, Event::PlayerAdd { ref name, .. } if name == "bob"), "{ev:?}");
+        let mut saw_alice = false;
+        while let Ok(ev) = client.rx.recv_timeout(Duration::from_secs(2)) {
+            if matches!(ev, Event::PlayerAdd { ref name, .. } if name == "alice") {
+                saw_alice = true;
+                break;
+            }
+        }
+        assert!(saw_alice);
+
+        client.send(client_player, 0, b"hello");
+        let ev = host.rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(ev, Event::Data { ref data, .. } if data == b"hello"), "{ev:?}");
+        host.send(host_player, 0, b"world");
+        let ev = client.rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(ev, Event::Data { ref data, .. } if data == b"world"), "{ev:?}");
+        host.close();
+        client.close();
+    }
 }
