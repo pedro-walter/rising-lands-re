@@ -57,6 +57,8 @@ The original DirectPlay connection is replaced by a direct TCP connection:
 | variable | meaning |
 |---|---|
 | `RL_FPS` | frames per second the game loop is held to (default 30) |
+| `RL_WASD` | start with WASD scrolling the map (`Alt+W` toggles it in game) |
+| `RL_GRAB` | keep the mouse inside the window |
 | `RL_USERDIR` | where saved games go (default: the platform's per-user data directory) |
 | `RL_LOG_CALLS` | log every Windows/DirectX call the game makes (debugging) |
 | `RL_SCRIPT`, `RL_SHOT`, `RL_SECS` | headless runs: scripted input and PNG screenshots, no window |

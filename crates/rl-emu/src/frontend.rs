@@ -67,6 +67,11 @@ pub struct Frontend {
     late_release: Vec<usize>,
     /// W/A/S/D scroll the map like the arrow keys (`RL_WASD=1`, toggled with Alt+W).
     wasd: bool,
+    /// Last toast text drawn, so an unchanged overlay is not re-rendered every pass.
+    toast_drawn: Option<String>,
+    /// The frame looks like the in-game view (the game draws its own pointer on the map only).
+    ingame: bool,
+    sys_cursor: bool,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -132,7 +137,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some() })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, sys_cursor: false })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -263,6 +268,16 @@ impl Frontend {
         true
     }
 
+    /// The game draws its pointer only over the map; menus and the bottom panel need the system one.
+    fn update_cursor(&mut self, uc: &Uc) {
+        let (x, y) = uc.get_data().cursor;
+        let want_sys = !(self.ingame && y < 545);
+        if want_sys != self.sys_cursor {
+            self.sys_cursor = want_sys;
+            self._sdl.mouse().show_cursor(want_sys);
+        }
+    }
+
     /// Uploads and shows the primary surface if the guest presented a new frame.
     pub fn present(&mut self, uc: &mut Uc) {
         // A movie takes over the whole window while it plays.
@@ -278,16 +293,21 @@ impl Frontend {
             }
             return;
         }
+        self.update_cursor(uc);
         let n = uc.get_data().com.frames_presented;
         let toast = uc.get_data().ui.toast.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 8).map(|(s, _)| s.clone());
         let overlay_on = self.prompt.is_some() || toast.is_some();
-        if n == self.shown && !overlay_on && !self.was_overlay {
+        let same_toast = self.toast_drawn == toast;
+        if n == self.shown && same_toast && self.prompt.is_none() && overlay_on == self.was_overlay {
             return;
         }
+        let new_frame = n != self.shown;
+        self.toast_drawn = toast.clone();
         self.shown = n;
         self.was_overlay = overlay_on;
-        if n != 0 {
+        if n != 0 && (new_frame || self.last_frame.is_none()) {
             if let Some(f) = com::snapshot(uc) {
+                self.ingame = looks_ingame(&f);
                 self.last_frame = Some(f);
             }
         }
@@ -322,6 +342,20 @@ impl Frontend {
         let _ = self.canvas.copy(&self.tex, None, None);
         self.canvas.present();
     }
+}
+
+/// The in-game screen has a grey stone bar along the bottom (rows 545..600 of an 800x600 frame).
+fn looks_ingame(f: &(u32, u32, Vec<u8>)) -> bool {
+    let (w, h, px) = (f.0 as usize, f.1 as usize, &f.2);
+    if (w, h) != (800, 600) {
+        return false;
+    }
+    let grey = (0..20).filter(|i| {
+        let o = (580 * w + 10 + i * 14) * 4;
+        let (r, g, b) = (px[o] as i32, px[o + 1] as i32, px[o + 2] as i32);
+        (r - g).abs() < 16 && (g - b).abs() < 16 && (50..170).contains(&r)
+    });
+    grey.count() >= 16
 }
 
 /// Synthesises input for scripted (headless) runs.
