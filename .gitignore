@@ -1,0 +1,9 @@
+/target
+/original/
+/extracted/
+/tools/
+*.iso
+*.BIN
+*.CUE
+*.cue
+*.bin

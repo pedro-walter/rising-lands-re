@@ -1,0 +1,10 @@
+[package]
+name = "rl-game"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+rl-assets = { path = "../rl-assets" }
+png = "0.17"
+sdl2 = { version = "0.37", features = ["bundled", "static-link"] }

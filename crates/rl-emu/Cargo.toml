@@ -1,0 +1,11 @@
+[package]
+name = "rl-emu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+unicorn-engine = "2.1"
+goblin = { version = "0.9", default-features = false, features = ["pe32", "std"] }
+png = "0.17"
+sdl2 = { version = "0.37", features = ["bundled", "static-link"] }
