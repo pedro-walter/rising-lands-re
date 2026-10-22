@@ -136,6 +136,21 @@ fn format_printf(uc: &Uc, fmt: &str, mut argp: u32) -> String {
 
 /// Runs an imported function. Returns the value for EAX, if any.
 pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<u32> {
+    let r = call_import_inner(uc, idx, addr, a);
+    // The message pump is where the host gets control back (events, frame pacing). Yield there
+    // deterministically instead of relying on CPU timeouts, which could stop the CPU between a
+    // stub's hook and its `ret` and make the handler's result get lost.
+    if let Some(v) = r {
+        let n = &uc.get_data().stubs[idx].name;
+        if n == "PeekMessageA" || n == "GetMessageA" {
+            stop_with(uc, Action::Resume { pc: addr, set_eax: Some(v) });
+            return None;
+        }
+    }
+    r
+}
+
+fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<u32> {
     let name = uc.get_data().stubs[idx].name.clone();
     if uc.get_data().log_calls {
         eprintln!("[win32] {name}({:#x}, {:#x}, {:#x}, {:#x})", a[0], a[1], a[2], a[3]);

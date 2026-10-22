@@ -30,8 +30,9 @@ trampoline is hit resumes the interrupted stub (so its `ret N` runs with `EAX` s
 `Action::Call` can carry a list of further calls (used for enumeration callbacks) and temporary
 guest memory to free at the end.
 
-Timeouts (`emu_start`'s microsecond limit) can stop the CPU between a hook and the stub's `ret`;
-`last_hooked`/`skip_once` keep the handler from running twice.
+The CPU is never stopped by timeouts (a timeout could land between a stub's hook and its `ret` and
+lose the handler's result, which crashed multiplayer). Instead `PeekMessage`/`GetMessage` yield to
+the host deterministically (events, frame pacing), once per game loop pass.
 
 ## Frame pacing
 

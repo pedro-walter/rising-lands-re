@@ -176,7 +176,7 @@ fn main() -> ExitCode {
             let _ = std::fs::write(userdir().join("lasthost.txt"), &h);
             m.uc.get_data_mut().com.dplay.get_or_insert_with(dplay::Dp::new).net.add_host(&h);
         }
-        match m.step(8_000) {
+        match m.step(0) {
             Ok(Some(code)) => {
                 eprintln!("guest exited with {code}");
                 return ExitCode::SUCCESS;
