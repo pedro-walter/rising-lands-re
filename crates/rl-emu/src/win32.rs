@@ -624,11 +624,30 @@ fn profile_value(uc: &mut Uc, file: &str, app: &str, key: &str) -> Option<String
     Some(rest[..rest.find('\u{2}')?].to_string())
 }
 
+/// Mission text / info screens (ids 0x11, 0x17): the scroll arrows act only on frames where the
+/// frame counter (0x508f7c) is a multiple of 10 while the click flag (0x5099ae) is set, so a short
+/// click scrolled only some of the time. When the flag first appears, line the counter up so the
+/// next frame scrolls once (holding still repeats every 10 frames).
+fn scroll_click_assist(uc: &mut Uc) {
+    let down = rd_bytes(uc, 0x5099ae, 1)[0] != 0;
+    let armed = uc.get_data().click_aligned;
+    if !down {
+        uc.get_data_mut().click_aligned = false;
+    } else if !armed {
+        uc.get_data_mut().click_aligned = true;
+        if matches!(rd_bytes(uc, 0x4e2f78, 1)[0], 0x11 | 0x17) {
+            let n = rd32(uc, 0x508f7c);
+            wr32(uc, 0x508f7c, n - n % 10 + 9);
+        }
+    }
+}
+
 /// The game loop polls for messages once per pass; hold it to the frame budget so the
 /// game runs at the intended speed instead of as fast as the host allows.
 fn pace_frame(uc: &mut Uc) {
+    scroll_click_assist(uc);
     let now = std::time::Instant::now();
-    let (next, interval) = (uc.get_data().next_frame, uc.get_data().frame_interval);
+    let (next, interval) = (uc.get_data().next_frame, uc.get_data().frame_interval.div_f64(uc.get_data().speed));
     if next > now {
         std::thread::sleep(next - now);
         uc.get_data_mut().next_frame = next + interval;

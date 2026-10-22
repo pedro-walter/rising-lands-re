@@ -227,6 +227,21 @@ impl Frontend {
                     st.ui.toast(format!("VELOCIDADE: {fps} QUADROS POR SEGUNDO"));
                     self.was_overlay = true;
                 }
+                // F1-F4: 1x, 1.5x, 2x, 3x. The original skipped frames to go faster; at the
+                // fixed frame rate that only degrades the picture, so scale the pace instead.
+                Event::KeyDown { keycode: Some(k @ (Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4)), repeat: false, .. } => {
+                    let (speed, label) = match k {
+                        Keycode::F1 => (1.0, "1X"),
+                        Keycode::F2 => (1.5, "1,5X"),
+                        Keycode::F3 => (2.0, "2X"),
+                        _ => (3.0, "3X"),
+                    };
+                    let st = uc.get_data_mut();
+                    st.speed = speed;
+                    st.ui.toast(format!("VELOCIDADE: {label}"));
+                    self.was_overlay = true;
+                }
+                Event::KeyUp { keycode: Some(Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4), .. } => {}
                 Event::KeyDown { keycode: Some(Keycode::Return), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
                     let w = self.canvas.window_mut();
                     let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;

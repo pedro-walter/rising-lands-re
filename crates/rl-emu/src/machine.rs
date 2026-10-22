@@ -104,6 +104,10 @@ pub struct State {
     pub keys: [bool; 256],
     /// Minimum host time between two game-loop passes (the original loop was uncapped).
     pub frame_interval: std::time::Duration,
+    /// F1-F4 game speed multiplier applied on top of `frame_interval`.
+    pub speed: f64,
+    /// Set while the click flag has been seen (see `scroll_click_assist`).
+    pub click_aligned: bool,
     pub next_frame: Instant,
     pub log_calls: bool,
     pub strings: HashMap<&'static str, u32>,
@@ -303,6 +307,8 @@ impl Machine {
             frame_interval: std::time::Duration::from_secs_f64(
                 1.0 / std::env::var("RL_FPS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| *f > 0.0).unwrap_or(30.0),
             ),
+            speed: 1.0,
+            click_aligned: false,
             next_frame: Instant::now(),
             log_calls: std::env::var_os("RL_LOG_CALLS").is_some(),
             strings: HashMap::new(),

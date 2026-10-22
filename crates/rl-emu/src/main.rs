@@ -79,6 +79,13 @@ fn run_script_step(m: &mut machine::Machine, st: &Step) -> bool {
             frontend::inject_key(uc, vk, false);
         }
         "shot" => dump(m, Some(&st.arg)),
+        // Debug: hex dump of guest memory, arg `addr:len` (hex).
+        "mem" => {
+            if let Some((a, l)) = st.arg.split_once(':') {
+                let (a, l) = (u32::from_str_radix(a, 16).unwrap_or(0), usize::from_str_radix(l, 16).unwrap_or(0));
+                eprintln!("[mem {a:x}] {:02x?}", machine::rd_bytes(uc, a, l));
+            }
+        }
         // Debug: list the building table (index, +1, +2, +8, +0x72, +0x7c, +0xab).
         "bld" => {
             let base = machine::rd32(uc, 0x4e19a0);

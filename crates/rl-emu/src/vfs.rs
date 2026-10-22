@@ -113,12 +113,46 @@ impl Vfs {
             }
             fs::OpenOptions::new().read(true).write(true).create(create).truncate(create).open(dst).ok()?
         } else {
-            File::open(self.resolve(path)?).ok()?
+            File::open(self.patched(self.resolve(path)?)).ok()?
         };
         let h = self.next_handle;
         self.next_handle += 4;
         self.files.insert(h, f);
         Some(h)
+    }
+
+    /// Text corrections applied to installed files when they are read: (file name, wrong, right),
+    /// all CP1252 bytes. The corrected copy lives in the overlay; the install is never touched.
+    const TEXT_FIXES: &'static [(&'static str, &'static [u8], &'static [u8])] = &[
+        // Mission 1 asks for a storage with 50 food and 50 stone, not for protecting a cave.
+        (
+            "monde01.txt",
+            b"- Proteja uma caverna.\r\n- Estoque 50 sacos de comida e\r\n50 sacos de pedras na caverna.",
+            b"- Construa um armaz\xe9m.\r\n- Estoque 50 sacos de comida e\r\n50 sacos de pedras no armaz\xe9m.",
+        ),
+    ];
+
+    fn patched(&self, src: PathBuf) -> PathBuf {
+        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+        let fixes: Vec<_> = Self::TEXT_FIXES.iter().filter(|f| f.0 == name).collect();
+        if fixes.is_empty() {
+            return src;
+        }
+        let Ok(mut data) = fs::read(&src) else { return src };
+        let mut changed = false;
+        for (_, from, to) in fixes {
+            if let Some(i) = data.windows(from.len()).position(|w| w == *from) {
+                data.splice(i..i + from.len(), to.iter().copied());
+                changed = true;
+            }
+        }
+        let dir = self.overlay.join(".textfix");
+        let dst = dir.join(&name);
+        if changed && fs::create_dir_all(&dir).is_ok() && fs::write(&dst, data).is_ok() {
+            dst
+        } else {
+            src
+        }
     }
 
     pub fn file(&mut self, h: u32) -> Option<&mut File> {
