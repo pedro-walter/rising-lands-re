@@ -268,6 +268,9 @@ pub fn call_method(uc: &mut Uc, name: &str, a: &[u32; 14], resume: u32) -> Optio
             let d = dp(uc);
             d.pump();
             let Some((from, to, data)) = d.msgs.front().cloned() else { return Some(DPERR_NOMESSAGES) };
+            if std::env::var_os("RL_NETLOG").is_some() {
+                eprintln!("[net] receive: next message from={from} to={to} len={} buffer={}", data.len(), rd32(uc, a[5]));
+            }
             let have = rd32(uc, a[5]);
             let mut data = data;
             // System messages carry pointers to their strings: fix them up for this buffer.

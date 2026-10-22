@@ -334,6 +334,16 @@ impl Machine {
 
         uc.add_code_hook(STUB_BASE as u64, (STUB_BASE + STUB_SIZE) as u64, |uc, addr, _| on_stub(uc, addr as u32))
             .map_err(|e| format!("hook: {e:?}"))?;
+        // RL_TRACE=<hex addr>[,<hex addr>...] logs the registers each time the guest reaches an address.
+        if let Ok(spec) = std::env::var("RL_TRACE") {
+            for a in spec.split(',').filter_map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()) {
+                uc.add_code_hook(a as u64, a as u64, move |uc, addr, _| {
+                    let r = |x| reg(uc, x);
+                    eprintln!("[trace] {addr:#x} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x} esi={:#x} edi={:#x} esp={:#x}", r(RegisterX86::EAX), r(RegisterX86::EBX), r(RegisterX86::ECX), r(RegisterX86::EDX), r(RegisterX86::ESI), r(RegisterX86::EDI), r(RegisterX86::ESP));
+                })
+                .map_err(|e| format!("trace: {e:?}"))?;
+            }
+        }
         // RL_WATCH=<hex addr>[:<len>] logs guest writes to that range (debugging aid).
         if let Some(spec) = std::env::var("RL_WATCH").ok() {
             let (a, l) = spec.split_once(':').unwrap_or((&spec, "4"));
