@@ -113,7 +113,7 @@ Interval in seconds at normal speed; "groups" are `MONSTRE.INI` `GROUPEnn` level
 9 = soldier+thief, 10 = 2 lizards, 11 = lizard+footman, 12 = lizard+boar+footman, 13 = mastaar+lizard+boar+footman,
 14 = all seven, 15 = nothing (an empty wave). Mission 5: three spawn points at 780, 1140 and 480 s, levels 0, 1, 2, 8, 9
 (single soldiers, firekeepers or thieves), so the first raid arrives after 8 minutes. Waves get bigger and more
-frequent: missions 1-3 have 1-2 spawn points every 3-6 minutes with single soldiers, 6-9 add lizards, 10-12 add
+frequent: missions 1-3 have 1-2 spawn points every 3-6 minutes with single soldiers, 7-9 add lizards, 10-12 add
 footmen, 14+ add boars, 18+ add mastaars (levels 3, 13), 21+ turtles; mission 22 has 11 spawn points and mission 24
 has 15. Roam markers (terrain byte 0x1c) go from 3 in mission 1 to about 250 in missions 22 and 24.
 
