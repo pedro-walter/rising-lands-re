@@ -8,4 +8,11 @@ license = "MIT"
 unicorn-engine = "2.1"
 goblin = { version = "0.9", default-features = false, features = ["pe32", "std"] }
 png = "0.17"
+
+# Linux uses the system SDL2 (`libsdl2-dev`): a bundled build lacks the PulseAudio/PipeWire/ALSA
+# backends unless their dev headers are installed, which silently means no sound.
+[target.'cfg(target_os = "linux")'.dependencies]
+sdl2 = "0.37"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
 sdl2 = { version = "0.37", features = ["bundled", "static-link"] }

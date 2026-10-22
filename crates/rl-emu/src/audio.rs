@@ -122,7 +122,14 @@ impl sdl2::audio::AudioCallback for Output {
 
     fn callback(&mut self, out: &mut [i16]) {
         match self.0.lock() {
-            Ok(mut m) => m.mix(out),
+            Ok(mut m) => {
+                m.mix(out);
+                if std::env::var_os("RL_AUDIO_LOG").is_some() {
+                    let peak = out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+                    let playing = m.voices.values().filter(|v| v.playing).count();
+                    eprintln!("audio: peak {peak} voices {playing} cd {}", m.cd.is_some());
+                }
+            }
             Err(_) => out.fill(0),
         }
     }
@@ -130,9 +137,9 @@ impl sdl2::audio::AudioCallback for Output {
 
 /// Opens the default playback device. Returns `None` when there is no audio.
 pub fn open(sdl: &sdl2::Sdl, mixer: Shared) -> Option<sdl2::audio::AudioDevice<Output>> {
-    let audio = sdl.audio().ok()?;
+    let audio = sdl.audio().map_err(|e| eprintln!("audio init: {e}")).ok()?;
     let spec = sdl2::audio::AudioSpecDesired { freq: Some(OUT_RATE as i32), channels: Some(2), samples: Some(1024) };
-    let dev = audio.open_playback(None, &spec, |_| Output(mixer)).ok()?;
+    let dev = audio.open_playback(None, &spec, |_| Output(mixer)).map_err(|e| eprintln!("audio open: {e}")).ok()?;
     dev.resume();
     Some(dev)
 }

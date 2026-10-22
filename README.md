@@ -18,6 +18,12 @@ Fixes live in the host side or as small patches:
   now holds the loop to `RL_FPS` frames per second (default 30).
 * Saved games and other writable files go to a per-user directory instead of the install folder.
 
+## Requirements
+
+Rust, a C compiler and CMake (Unicorn is built from source). On Linux also the SDL2 development
+package, e.g. `sudo apt install libsdl2-dev`; the system SDL is needed for sound (a bundled SDL has
+no PulseAudio/PipeWire/ALSA backend). Windows and macOS build SDL themselves.
+
 ## Quick start
 
 ```sh

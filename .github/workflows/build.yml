@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: SDL2 (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
       - name: Build tools and emulator
         run: cargo build --release -p rl-tool -p rl-emu
       - name: Unit tests (no game data needed)
