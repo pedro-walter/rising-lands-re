@@ -112,10 +112,9 @@ impl Frontend {
         canvas.set_logical_size(800, 600).map_err(|e| e.to_string())?;
         let creator: &'static TextureCreator<WindowContext> = Box::leak(Box::new(canvas.texture_creator()));
         let tex = creator.create_texture_streaming(PixelFormatEnum::ABGR8888, 800, 600).map_err(|e| e.to_string())?;
-        // The game draws its own cursor; keep the pointer inside the window so it can't wander
-        // off and come back at an unexpected place.
-        sdl.mouse().show_cursor(false);
-        if std::env::var_os("RL_NOGRAB").is_none() {
+        // The game relies on the system pointer, so leave it visible. Grabbing is opt-in.
+        sdl.mouse().show_cursor(true);
+        if std::env::var_os("RL_GRAB").is_some() {
             canvas.window_mut().set_grab(true);
         }
         video.text_input().start();

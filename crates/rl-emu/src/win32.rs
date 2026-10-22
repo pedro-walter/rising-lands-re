@@ -142,7 +142,9 @@ pub fn call_import(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Option<
     // stub's hook and its `ret` and make the handler's result get lost.
     if let Some(v) = r {
         let n = &uc.get_data().stubs[idx].name;
-        if n == "PeekMessageA" || n == "GetMessageA" {
+        // The game waits for Return to be released by polling GetAsyncKeyState without ever
+            // touching the message queue, so that poll must let the host process input too.
+            if n == "PeekMessageA" || n == "GetMessageA" || (n == "GetAsyncKeyState" && v != 0) {
             stop_with(uc, Action::Resume { pc: addr, set_eax: Some(v) });
             return None;
         }
