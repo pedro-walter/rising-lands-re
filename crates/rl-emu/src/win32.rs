@@ -34,7 +34,8 @@ pub fn arg_bytes(_dll: &str, name: &str) -> (u16, bool) {
         "CreateFileA" => 7,
         "GetVolumeInformationA" => 8,
         "CreateWindowExA" => 12,
-        "#1" | "#2" => 3,
+        "#1" => 3,
+        "#2" => 2,
         _ => 0,
     };
     // wsprintfA and MCIWndCreateA are cdecl.

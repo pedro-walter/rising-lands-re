@@ -119,12 +119,13 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("--avi") && args.len() >= 5 {
         return dump_avi(&args);
     }
-    let (Some(install), Some(disc)) = (args.first(), args.get(1)) else {
-        eprintln!("usage: rl-emu <INSTALHD dir> <disc root dir>");
+    // Default layout: the folder the disc was extracted to (see `rl-tool disc`).
+    let disc = PathBuf::from(args.get(1).cloned().or_else(|| env::var("RL_DISC").ok()).unwrap_or_else(|| "original".into()));
+    let install = PathBuf::from(args.first().cloned().or_else(|| env::var("RL_GAME").ok()).unwrap_or_else(|| disc.join("INSTALHD").to_string_lossy().into_owned()));
+    if !install.join("RISING.EXE").exists() {
+        eprintln!("usage: rl-emu [<INSTALHD dir> [<disc root dir>]]\n\nCannot find RISING.EXE in {}.\nExtract your disc first: rl-tool disc <image.bin> original", install.display());
         return ExitCode::from(2);
-    };
-    let install = PathBuf::from(install);
-    let disc = PathBuf::from(disc);
+    }
     let mut m = match machine::Machine::new(&install.join("RISING.EXE"), &install, &disc, &userdir()) {
         Ok(m) => m,
         Err(e) => {

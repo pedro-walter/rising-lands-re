@@ -32,6 +32,7 @@ pub struct Frontend {
     canvas: Canvas<Window>,
     // Leaked so the texture can live as long as the program, which keeps the types simple.
     tex: Texture<'static>,
+    tex_size: (u32, u32),
     _creator: &'static TextureCreator<WindowContext>,
     events: EventPump,
     shown: u64,
@@ -88,6 +89,12 @@ impl Frontend {
         canvas.set_logical_size(800, 600).map_err(|e| e.to_string())?;
         let creator: &'static TextureCreator<WindowContext> = Box::leak(Box::new(canvas.texture_creator()));
         let tex = creator.create_texture_streaming(PixelFormatEnum::ABGR8888, 800, 600).map_err(|e| e.to_string())?;
+        // The game draws its own cursor; keep the pointer inside the window so it can't wander
+        // off and come back at an unexpected place.
+        sdl.mouse().show_cursor(false);
+        if std::env::var_os("RL_NOGRAB").is_none() {
+            canvas.window_mut().set_grab(true);
+        }
         video.text_input().start();
         let audio_dev = crate::audio::open(&sdl, mixer);
         if audio_dev.is_none() {
@@ -96,7 +103,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -127,6 +134,11 @@ impl Frontend {
                     uc.get_data_mut().keys[vk] = down;
                     uc.get_data_mut().cursor = (x, y);
                     post(uc, m, 0, ((y as u32) << 16) | (x as u32 & 0xffff));
+                }
+                Event::KeyDown { keycode: Some(Keycode::Return), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
+                    let w = self.canvas.window_mut();
+                    let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;
+                    let _ = w.set_fullscreen(if full { sdl2::video::FullscreenType::Off } else { sdl2::video::FullscreenType::Desktop });
                 }
                 Event::KeyDown { keycode: Some(k), repeat, .. } | Event::KeyUp { keycode: Some(k), repeat, .. } => {
                     let down = matches!(e, Event::KeyDown { .. });
@@ -173,12 +185,18 @@ impl Frontend {
         }
         self.shown = n;
         if let Some((w, h, rgba)) = com::snapshot(uc) {
-            if (w, h) == (800, 600) {
-                let _ = self.tex.update(None, &rgba, 800 * 4);
-                self.canvas.clear();
-                let _ = self.canvas.copy(&self.tex, None, None);
-                self.canvas.present();
+            // F11 switches the game between 800x600 and 640x480.
+            if (w, h) != self.tex_size {
+                if let Ok(t) = self._creator.create_texture_streaming(PixelFormatEnum::ABGR8888, w, h) {
+                    self.tex = t;
+                    self.tex_size = (w, h);
+                    let _ = self.canvas.set_logical_size(w, h);
+                }
             }
+            let _ = self.tex.update(None, &rgba, w as usize * 4);
+            self.canvas.clear();
+            let _ = self.canvas.copy(&self.tex, None, None);
+            self.canvas.present();
         }
     }
 }
