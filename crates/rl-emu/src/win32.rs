@@ -251,6 +251,10 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
         // ---- profile strings (RISING.INI holds all unit and building stats) ----
         "GetPrivateProfileIntA" => {
             let (app, key, file) = (rd_cstr(uc, a[0]), rd_cstr(uc, a[1]), rd_cstr(uc, a[3]));
+            if std::env::var("RL_LOG_INI").is_ok_and(|p| app.contains(&p)) {
+                let esp = uc.reg_read(unicorn_engine::RegisterX86::ESP).unwrap_or(0) as u32;
+                eprintln!("[ini] {app}.{key} = {:?} (from {:#x})", profile_value(uc, &file, &app, &key), rd32(uc, esp));
+            }
             match profile_value(uc, &file, &app, &key) {
                 Some(v) => parse_int_prefix(&v).unwrap_or(a[2] as i32) as u32,
                 None => a[2],

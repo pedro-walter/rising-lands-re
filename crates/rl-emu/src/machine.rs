@@ -392,8 +392,15 @@ impl Machine {
         if let Some(spec) = std::env::var("RL_WATCH").ok() {
             let (a, l) = spec.split_once(':').unwrap_or((&spec, "4"));
             if let (Ok(w), Ok(len)) = (u32::from_str_radix(a.trim_start_matches("0x"), 16), l.parse::<u32>()) {
+                // RL_WATCH_MOD=<stride>:<offset> (decimal) only logs writes at that field of each stride-sized record.
+                let modf: Option<(u64, u64)> = std::env::var("RL_WATCH_MOD").ok().and_then(|m| m.split_once(':').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))));
                 uc.add_mem_hook(HookType::MEM_WRITE, w as u64, (w + len.max(1) - 1) as u64, move |uc, _, addr, size, val| {
-                    eprintln!("[watch] write {size} at {addr:#x} = {val:#x} from eip={:#x}", reg(uc, RegisterX86::EIP));
+                    if modf.is_some_and(|(st, off)| (addr - w as u64) % st != off) {
+                        return true;
+                    }
+                    let esp = reg(uc, RegisterX86::ESP);
+                    let stack: Vec<String> = (0..64).map(|i| rd32(uc, esp + i * 4)).filter(|v| (0x401000..0x494000).contains(v)).take(6).map(|v| format!("{v:#x}")).collect();
+                    eprintln!("[watch] write {size} at {addr:#x} = {val:#x} from eip={:#x} stack: {}", reg(uc, RegisterX86::EIP), stack.join(" "));
                     true
                 })
                 .map_err(|e| format!("watch: {e:?}"))?;
