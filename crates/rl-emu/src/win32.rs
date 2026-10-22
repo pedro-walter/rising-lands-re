@@ -189,7 +189,13 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
             1
         }
         "GetProcAddress" | "LoadLibraryA" | "FreeLibrary" => 0,
-        "GetTickCount" | "timeGetTime" => uc.get_data().start.elapsed().as_millis() as u32,
+        "GetTickCount" | "timeGetTime" => {
+            if std::env::var_os("RL_LOG_TICK").is_some() {
+                let esp = uc.reg_read(unicorn_engine::RegisterX86::ESP).unwrap_or(0) as u32;
+                eprintln!("[tick] from {:#x}", rd32(uc, esp));
+            }
+            uc.get_data().start.elapsed().as_millis() as u32
+        }
         "GlobalMemoryStatus" => {
             // MEMORYSTATUS: pretend 128 MB.
             for (i, v) in [32u32, 50, 128 << 20, 100 << 20, 256 << 20, 200 << 20, 512 << 20, 400 << 20].iter().enumerate() {

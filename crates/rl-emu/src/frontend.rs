@@ -71,7 +71,7 @@ pub struct Frontend {
     toast_drawn: Option<String>,
     /// The frame looks like the in-game view (the game draws its own pointer on the map only).
     ingame: bool,
-    sys_cursor: bool,
+    cursor_drawn: Option<(i32, i32)>,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -137,7 +137,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, sys_cursor: false })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -268,14 +268,10 @@ impl Frontend {
         true
     }
 
-    /// The game draws its pointer only over the map; menus and the bottom panel need the system one.
-    fn update_cursor(&mut self, uc: &Uc) {
+    /// The game draws its pointer only over the map; elsewhere (menus, bottom bar) we draw one.
+    fn host_cursor(&self, uc: &Uc) -> Option<(i32, i32)> {
         let (x, y) = uc.get_data().cursor;
-        let want_sys = !(self.ingame && y < 545);
-        if want_sys != self.sys_cursor {
-            self.sys_cursor = want_sys;
-            self._sdl.mouse().show_cursor(want_sys);
-        }
+        (!(self.ingame && y < 545)).then_some((x, y))
     }
 
     /// Uploads and shows the primary surface if the guest presented a new frame.
@@ -293,14 +289,15 @@ impl Frontend {
             }
             return;
         }
-        self.update_cursor(uc);
         let n = uc.get_data().com.frames_presented;
         let toast = uc.get_data().ui.toast.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 8).map(|(s, _)| s.clone());
         let overlay_on = self.prompt.is_some() || toast.is_some();
         let same_toast = self.toast_drawn == toast;
-        if n == self.shown && same_toast && self.prompt.is_none() && overlay_on == self.was_overlay {
+        let hc = self.host_cursor(uc);
+        if n == self.shown && same_toast && self.prompt.is_none() && overlay_on == self.was_overlay && hc == self.cursor_drawn {
             return;
         }
+        self.cursor_drawn = hc;
         let new_frame = n != self.shown;
         self.toast_drawn = toast.clone();
         self.shown = n;
@@ -332,6 +329,9 @@ impl Frontend {
             overlay::draw_text(&mut rgba, stride, bx + 12, by + 12, label, 2, [230, 200, 140, 255]);
             overlay::draw_text(&mut rgba, stride, bx + 12, by + 40, &line, 3, [255, 255, 255, 255]);
         }
+        if let Some((cx, cy)) = hc {
+            overlay::draw_arrow(&mut rgba, w as usize, h as usize, cx, cy);
+        }
         if let Some(t) = toast {
             let bw = overlay::text_width(&t, 2) + 20;
             overlay::fill_rect(&mut rgba, stride, 8, 8, bw.min(stride - 16), 26, [20, 12, 8, 220]);
@@ -351,11 +351,11 @@ fn looks_ingame(f: &(u32, u32, Vec<u8>)) -> bool {
         return false;
     }
     let grey = (0..20).filter(|i| {
-        let o = (580 * w + 10 + i * 14) * 4;
+        let o = (590 * w + 300 + i * 9) * 4;
         let (r, g, b) = (px[o] as i32, px[o + 1] as i32, px[o + 2] as i32);
         (r - g).abs() < 16 && (g - b).abs() < 16 && (50..170).contains(&r)
     });
-    grey.count() >= 16
+    grey.count() >= 12
 }
 
 /// Synthesises input for scripted (headless) runs.

@@ -251,6 +251,11 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
                     }
                 }
             }
+            if std::env::var_os("RL_LOG_SURF").is_some() {
+                if let Some(Obj::Surface(sf)) = uc.get_data().com.objs.get(&s) {
+                    eprintln!("[surf] {w}x{h} caps={caps:#x} mem={:#x}", sf.mem);
+                }
+            }
             wr32(uc, a[2], s);
             0
         }

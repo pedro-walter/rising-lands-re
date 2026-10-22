@@ -80,3 +80,40 @@ pub fn draw_text(rgba: &mut [u8], stride_px: usize, x: usize, y: usize, text: &s
         }
     }
 }
+
+/// A small arrow pointer (white, black outline) with its tip at (x, y).
+pub fn draw_arrow(rgba: &mut [u8], w: usize, h: usize, x: i32, y: i32) {
+    const A: [&str; 16] = [
+        "X",
+        "XX",
+        "X.X",
+        "X..X",
+        "X...X",
+        "X....X",
+        "X.....X",
+        "X......X",
+        "X.......X",
+        "X....XXXXX",
+        "X..X..X",
+        "X.X X..X",
+        "XX  X..X",
+        "X    X..X",
+        "     X..X",
+        "      XX",
+    ];
+    for (j, row) in A.iter().enumerate() {
+        for (i, c) in row.bytes().enumerate() {
+            let (px, py) = (x + i as i32, y + j as i32);
+            if px < 0 || py < 0 || px as usize >= w || py as usize >= h {
+                continue;
+            }
+            let col = match c {
+                b'X' => [0, 0, 0, 255],
+                b'.' => [255, 255, 255, 255],
+                _ => continue,
+            };
+            let o = (py as usize * w + px as usize) * 4;
+            rgba[o..o + 4].copy_from_slice(&col);
+        }
+    }
+}

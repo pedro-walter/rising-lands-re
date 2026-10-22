@@ -55,6 +55,9 @@ fn run_script_step(m: &mut machine::Machine, st: &Step) -> bool {
     match st.cmd.as_str() {
         "move" => {
             let (x, y) = xy(&st.arg);
+            if std::env::var_os("RL_LOG_MOVE").is_some() {
+                eprintln!("[move] {x},{y}");
+            }
             frontend::inject_mouse(uc, x, y, None);
         }
         "click" | "rclick" => {
@@ -76,6 +79,19 @@ fn run_script_step(m: &mut machine::Machine, st: &Step) -> bool {
             frontend::inject_key(uc, vk, false);
         }
         "shot" => dump(m, Some(&st.arg)),
+        // Debug: list the building table (index, +1, +2, +8, +0x72, +0x7c, +0xab).
+        "bld" => {
+            let base = machine::rd32(uc, 0x4e19a0);
+            for i in 0..800u32 {
+                let b = machine::rd_bytes(uc, base + i * 0x114, 0x114);
+                if b[2] != 0 {
+                    if i == 0 {
+                        eprintln!("[bld0] {:02x?}", b);
+                    }
+                    eprintln!("[bld] {i} t1={:#x} t2={:#x} p8={} f72={:#x} p7c={} fab={:#x}", b[1], b[2], u16::from_le_bytes([b[8], b[9]]), b[0x72], u16::from_le_bytes([b[0x7c], b[0x7d]]), b[0xab]);
+                }
+            }
+        }
         "quit" => return false,
         other => eprintln!("script: unknown command {other}"),
     }
