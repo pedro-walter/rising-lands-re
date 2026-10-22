@@ -164,7 +164,16 @@ fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().skip(1).collect();
     // Prototyping flags: `--skip-intro` drops the movies, `--new-game` clicks through the menus into mission 1.
     let skip_intro = args.iter().any(|a| a == "--skip-intro" || a == "--new-game");
-    let new_game = args.iter().any(|a| a == "--new-game");
+    // `--mission N` / `--map WORLD/MONDE05.ETA`: like `--new-game`, then jump to mission N.
+    let mission: Option<u32> = args.iter().position(|a| a == "--mission" || a == "--map").and_then(|i| {
+        let digits: String = args.get(i + 1)?.rsplit(['/', '\\']).next()?.to_ascii_lowercase().trim_start_matches("monde").chars().take_while(char::is_ascii_digit).collect();
+        digits.parse().ok().filter(|n| (1..=25).contains(n))
+    });
+    let skip_intro = skip_intro || mission.is_some();
+    let new_game = args.iter().any(|a| a == "--new-game") || mission.is_some();
+    if let Some(i) = args.iter().position(|a| a == "--mission" || a == "--map") {
+        args.drain(i..(i + 2).min(args.len()));
+    }
     args.retain(|a| !a.starts_with("--") || a == "--avi");
     if args.first().map(String::as_str) == Some("--avi") && args.len() >= 5 {
         return dump_avi(&args);
@@ -207,7 +216,17 @@ fn main() -> ExitCode {
     // `--new-game`: once the main menu is up (first frame after the movies), click Novo jogo, the
     // first campaign and the first mission. Times are relative to that first frame.
     let mut auto: std::collections::VecDeque<Step> = if new_game {
-        parse_script("1.0:move:400,296;1.5:click:400,296;3:move:400,321;3.5:click:400,321;6:move:400,296;6.5:click:400,296").into()
+        let mut script = String::from("1.0:move:400,296;1.5:click:400,296;3:move:400,321;3.5:click:400,321;6:move:400,296;6.5:click:400,296");
+        if let Some(n) = mission.filter(|&n| n > 1) {
+            // The game loads mission `counter + 1` after a victory: set the counter, win mission 1 with a full
+            // stockpile, then click through the debriefing and the briefing.
+            script += &format!(";40:dbg:poke 496fe4 {} 1;40.5:dbg:res all 500", n - 1);
+            for k in 0..8 {
+                script += &format!(";{}:click:400,300", 46 + k * 6);
+            }
+            script += ";100:click:305,525";
+        }
+        parse_script(&script).into()
     } else {
         Default::default()
     };

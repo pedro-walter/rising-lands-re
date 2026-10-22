@@ -1,7 +1,8 @@
 # Debug console and tooling
 
 Press **F12** in the window to open the console (Enter runs, Esc closes). From scripts use
-`RL_SCRIPT="45:dbg:res comida 500"`. Launch flags: `--skip-intro`, `--new-game` (mission 1).
+`RL_SCRIPT="45:dbg:res comida 500"`. Launch flags: `--skip-intro`, `--new-game` (mission 1), `--mission N` / `--map <MONDEnn.ETA>` (mission N, ~2 min: it wins mission 1 with a full stockpile after setting
+the campaign counter at `0x496fe4` to N-1; the game loads mission counter+1 next).
 
 | Command | Effect |
 |---|---|
