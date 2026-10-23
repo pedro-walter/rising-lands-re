@@ -642,14 +642,8 @@ mod tests {
         // The host learns about bob, the client about alice.
         let ev = host.rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(ev, Event::PlayerAdd { ref name, .. } if name == "bob"), "{ev:?}");
-        let mut saw_alice = false;
-        while let Ok(ev) = client.rx.recv_timeout(Duration::from_secs(2)) {
-            if matches!(ev, Event::PlayerAdd { ref name, .. } if name == "alice") {
-                saw_alice = true;
-                break;
-            }
-        }
-        assert!(saw_alice);
+        // Players present at join time arrive in the initial sync: listed, not announced as events.
+        assert!(client.players().iter().any(|(_, n, _)| n == "alice"), "{:?}", client.players());
 
         client.send(client_player, 0, b"hello");
         let ev = host.rx.recv_timeout(Duration::from_secs(2)).unwrap();

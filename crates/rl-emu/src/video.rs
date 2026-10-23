@@ -351,3 +351,215 @@ impl Player {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut c = id.to_vec();
+        c.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        c.extend_from_slice(body);
+        if body.len() & 1 == 1 {
+            c.push(0);
+        }
+        c
+    }
+
+    fn list(kind: &[u8; 4], children: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = kind.to_vec();
+        body.extend(children.iter().flatten());
+        chunk(b"LIST", &body)
+    }
+
+    fn put32(b: &mut [u8], at: usize, v: u32) {
+        b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    fn strh(kind: &[u8; 4], scale: u32, rate: u32) -> Vec<u8> {
+        let mut b = vec![0u8; 56];
+        b[..4].copy_from_slice(kind);
+        put32(&mut b, 20, scale);
+        put32(&mut b, 24, rate);
+        chunk(b"strh", &b)
+    }
+
+    fn adpcm_format(tag: u16, channels: u16, rate: u32, block: u16) -> Vec<u8> {
+        let mut b = vec![0u8; 26];
+        b[0..2].copy_from_slice(&tag.to_le_bytes());
+        b[2..4].copy_from_slice(&channels.to_le_bytes());
+        put32(&mut b, 4, rate);
+        b[12..14].copy_from_slice(&block.to_le_bytes());
+        b[20..22].copy_from_slice(&1u16.to_le_bytes());
+        b[22..24].copy_from_slice(&256i16.to_le_bytes()); // coef1
+        chunk(b"strf", &b)
+    }
+
+    fn avi(audio_tag: u16) -> Vec<u8> {
+        let mut avih = vec![0u8; 56];
+        put32(&mut avih, 32, 8);
+        put32(&mut avih, 36, 4);
+        let hdrl = list(b"hdrl", &[
+            chunk(b"avih", &avih),
+            list(b"strl", &[strh(b"vids", 1, 15), chunk(b"strf", &[0; 40])]),
+            list(b"strl", &[strh(b"auds", 1, 22050), adpcm_format(audio_tag, 1, 22050, 8)]),
+        ]);
+        // ADPCM block: predictor 0, delta 16, s1 100, s2 50, then one byte of nibbles.
+        let block = [0u8, 16, 0, 100, 0, 50, 0, 0x1f];
+        let movi = list(b"movi", &[chunk(b"00dc", b"frame-one"), chunk(b"01wb", &block), chunk(b"00dc", b"odd"), chunk(b"junk", b"zz")]);
+        let mut body = b"AVI ".to_vec();
+        body.extend(hdrl);
+        body.extend(movi);
+        let mut f = b"RIFF".to_vec();
+        f.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        f.extend(body);
+        f
+    }
+
+    #[test]
+    fn parses_headers_frames_and_adpcm_audio() {
+        let a = Avi::parse(&avi(2)).unwrap();
+        assert_eq!((a.width, a.height, a.rate), (8, 4, (15, 1)));
+        assert_eq!(a.frames, [b"frame-one".to_vec(), b"odd".to_vec()]);
+        assert_eq!((a.channels, a.sample_rate), (1, 22050));
+        assert_eq!(a.audio, [50, 100, 116, 100]);
+    }
+
+    #[test]
+    fn rejects_non_avi_and_unsupported_audio() {
+        assert_eq!(Avi::parse(b"RIFF").err().unwrap(), "not an AVI file");
+        assert_eq!(Avi::parse(b"RIFF\0\0\0\0WAVEfmt ").err().unwrap(), "not an AVI file");
+        assert_eq!(Avi::parse(&avi(1)).err().unwrap(), "unsupported audio format 1");
+        // Truncated files parse as far as they go.
+        let full = avi(2);
+        assert!(Avi::parse(&full[..full.len() - 30]).is_ok());
+    }
+
+    #[test]
+    fn adpcm_mono_stereo_and_clamping() {
+        let c = [(256, 0)];
+        assert_eq!(ms_adpcm(&[0, 16, 0, 100, 0, 50, 0, 0x1f], 1, 8, &c), [50, 100, 116, 100]);
+        // Stereo: predictors, deltas, s1, s2 for both channels; nibbles alternate channels.
+        let st = [0, 0, 16, 0, 16, 0, 100, 0, 200, 0, 50, 0, 60, 0, 0x10];
+        assert_eq!(ms_adpcm(&st, 2, 15, &c), [50, 60, 100, 200, 116, 200]);
+        // Large positive step saturates at i16::MAX; the last (short) block without a full header is dropped.
+        let big = [0, 0xff, 0x7f, 0xff, 0x7f, 0, 0, 0x70];
+        assert_eq!(ms_adpcm(&big, 1, 8, &c)[2], 32767);
+        assert!(ms_adpcm(&[0, 0, 0], 1, 8, &c).is_empty());
+        // Predictor indices beyond the table are clamped instead of panicking.
+        assert_eq!(ms_adpcm(&[9, 16, 0, 100, 0, 50, 0, 0x00], 1, 8, &c).len(), 4);
+    }
+
+    /// One Cinepak frame: header (flags, size, 4x? dims, strips) + a single strip of `chunks`.
+    fn frame(width: u16, height: u16, chunks: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut strip_body = Vec::new();
+        for (id, body) in chunks {
+            strip_body.extend_from_slice(&id.to_be_bytes());
+            strip_body.extend_from_slice(&((body.len() + 4) as u16).to_be_bytes());
+            strip_body.extend_from_slice(body);
+        }
+        let mut strip = vec![0x10, 0x00];
+        strip.extend_from_slice(&((strip_body.len() + 12) as u16).to_be_bytes());
+        strip.extend_from_slice(&[0, 0, 0, 0]);
+        strip.extend_from_slice(&height.to_be_bytes());
+        strip.extend_from_slice(&width.to_be_bytes());
+        strip.extend(strip_body);
+        let mut f = vec![0u8; 10];
+        f[4..6].copy_from_slice(&width.to_be_bytes());
+        f[6..8].copy_from_slice(&height.to_be_bytes());
+        f[8..10].copy_from_slice(&1u16.to_be_bytes());
+        f.extend(strip);
+        f
+    }
+
+    fn entry(y: [u8; 4], u: i8, v: i8) -> Vec<u8> {
+        vec![y[0], y[1], y[2], y[3], u as u8, v as u8]
+    }
+
+    fn gray(c: &Cinepak, x: usize, y: usize) -> [u8; 3] {
+        let o = (y * c.width + x) * 3;
+        c.rgb[o..o + 3].try_into().unwrap()
+    }
+
+    #[test]
+    fn v1_blocks_fill_4x4_and_colour_is_converted() {
+        let mut c = Cinepak::new(4, 4);
+        let book = entry([100; 4], 10, 20);
+        c.decode(&frame(4, 4, &[(0x2200, book), (0x3200, vec![0])])).unwrap();
+        // r = y + 2v, g = y - u/2 - v, b = y + 2u.
+        assert_eq!(gray(&c, 0, 0), [140, 75, 120]);
+        assert_eq!(gray(&c, 3, 3), [140, 75, 120]);
+    }
+
+    #[test]
+    fn v4_blocks_use_four_entries_of_the_second_codebook() {
+        let mut c = Cinepak::new(4, 4);
+        let mut book = Vec::new();
+        for i in 0..4u8 {
+            book.extend(entry([10 * (i + 1), 10 * (i + 1) + 1, 10 * (i + 1) + 2, 10 * (i + 1) + 3], 0, 0));
+        }
+        // Intra frame: first flag bit set => V4; indices pick entries 0..3.
+        let mut vec_body = 0x8000_0000u32.to_be_bytes().to_vec();
+        vec_body.extend_from_slice(&[0, 1, 2, 3]);
+        c.decode(&frame(4, 4, &[(0x2000, book), (0x3000, vec_body)])).unwrap();
+        assert_eq!(gray(&c, 0, 0)[0], 10);
+        assert_eq!(gray(&c, 1, 0)[0], 11);
+        assert_eq!(gray(&c, 0, 1)[0], 12);
+        assert_eq!(gray(&c, 1, 1)[0], 13);
+        assert_eq!(gray(&c, 2, 0)[0], 20);
+        assert_eq!(gray(&c, 0, 2)[0], 30);
+        assert_eq!(gray(&c, 3, 3)[0], 43);
+    }
+
+    #[test]
+    fn inter_frames_skip_blocks_and_codebook_updates_persist() {
+        let mut c = Cinepak::new(8, 4);
+        c.decode(&frame(8, 4, &[(0x2200, entry([100; 4], 0, 0)), (0x3200, vec![0, 0])])).unwrap();
+        assert_eq!(gray(&c, 7, 3)[0], 100);
+        // Partial codebook update (entry 0 -> 200); inter frame codes only the first block.
+        let mut upd = 0x8000_0000u32.to_be_bytes().to_vec();
+        upd.extend(entry([200; 4], 0, 0));
+        let mut body = 0x8000_0000u32.to_be_bytes().to_vec();
+        body.push(0);
+        c.decode(&frame(8, 4, &[(0x2300, upd), (0x3100, body)])).unwrap();
+        assert_eq!(gray(&c, 0, 0)[0], 200);
+        assert_eq!(gray(&c, 4, 0)[0], 100, "skipped block keeps the previous frame");
+    }
+
+    #[test]
+    fn monochrome_codebooks_have_no_chroma_and_edges_are_clipped() {
+        let mut c = Cinepak::new(2, 2);
+        c.decode(&frame(2, 2, &[(0x2600, vec![50, 60, 70, 80]), (0x3200, vec![0])])).unwrap();
+        assert_eq!(gray(&c, 0, 0), [50, 50, 50]);
+        assert_eq!(gray(&c, 1, 1), [50, 50, 50], "V1 blocks are 2x2-scaled: (1,1) is still the first luma");
+        assert_eq!(c.rgb.len(), 12, "a 4x4 block on a 2x2 frame does not write outside");
+    }
+
+    #[test]
+    fn truncated_data_is_tolerated_or_reported() {
+        let mut c = Cinepak::new(4, 4);
+        assert!(c.decode(&[0; 5]).is_err());
+        let mut f = frame(4, 4, &[]);
+        f.truncate(14);
+        assert!(c.decode(&f).is_err());
+        // A vector chunk with no data just stops; unknown chunk ids are skipped.
+        c.decode(&frame(4, 4, &[(0x9999, vec![1, 2]), (0x3200, vec![])])).unwrap();
+        c.decode(&frame(4, 4, &[(0x2200, vec![1, 2, 3]), (0x3000, vec![0, 0])])).unwrap();
+    }
+
+    #[test]
+    fn player_decodes_due_frames_and_finishes() {
+        let mut a = Avi::parse(&avi(2)).unwrap();
+        a.frames = vec![frame(8, 4, &[(0x2200, entry([90; 4], 0, 0)), (0x3200, vec![0, 0])]); 2];
+        let mut p = Player::new(a);
+        assert!(!p.dirty);
+        p.tick();
+        assert_eq!((p.next, p.dirty, p.finished), (1, true, false));
+        p.start -= Duration::from_secs(60);
+        p.tick();
+        assert_eq!((p.next, p.finished), (2, true));
+        assert_eq!(p.dec.rgb[0], 90);
+        p.tick(); // no effect once finished
+    }
+}

@@ -143,3 +143,121 @@ pub fn open(sdl: &sdl2::Sdl, mixer: Shared) -> Option<sdl2::audio::AudioDevice<O
     dev.resume();
     Some(dev)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn voice16(samples: &[i16], rate: u32) -> Voice {
+        let mut v = Voice::new(0);
+        v.data = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        v.bits = 16;
+        v.rate = rate;
+        v
+    }
+
+    #[test]
+    fn decibel_gain() {
+        assert_eq!(db_gain(0), 1.0);
+        assert!((db_gain(-2000) - 0.1).abs() < 1e-6);
+        assert!((db_gain(-6000) - 0.001).abs() < 1e-6);
+        assert_eq!(db_gain(500), 1.0, "clamped at unity");
+        assert_eq!(db_gain(-99999), db_gain(-10000));
+    }
+
+    #[test]
+    fn voice_geometry_and_samples() {
+        let v = Voice::new(100);
+        assert_eq!((v.channels, v.rate, v.bits, v.frames()), (1, 22050, 8, 100));
+        assert_eq!(v.sample(0, 0), -1.0, "8-bit silence is 0x00 -> -1.0 (zero-filled buffer)");
+        let mut v = voice16(&[16384, -16384, 8192, 0], 44100);
+        v.channels = 2;
+        assert_eq!(v.frames(), 2);
+        assert_eq!((v.sample(0, 0), v.sample(0, 1)), (0.5, -0.5));
+        assert_eq!(v.sample(1, 5), 0.0, "channel index is clamped to the last one");
+        let mut m = Voice::new(1);
+        m.data[0] = 192;
+        assert_eq!(m.sample(0, 1), 0.5, "mono voices answer both sides");
+    }
+
+    #[test]
+    fn mixes_a_playing_voice_to_both_sides_and_stops_at_the_end() {
+        let mut mx = Mixer::default();
+        let mut v = voice16(&[16384, 16384], 44100);
+        v.playing = true;
+        mx.voices.insert(1, v);
+        let mut out = [0i16; 8];
+        mx.mix(&mut out);
+        assert_eq!(out[..4], [16383, 16383, 16383, 16383]);
+        assert_eq!(out[4..], [0, 0, 0, 0], "silence after the buffer ends");
+        let v = &mx.voices[&1];
+        assert!(!v.playing);
+        assert_eq!(v.pos, 0.0);
+        // A stopped voice stays silent.
+        let mut out = [1i16; 4];
+        mx.mix(&mut out);
+        assert_eq!(out, [0; 4]);
+    }
+
+    #[test]
+    fn looping_voice_wraps() {
+        let mut mx = Mixer::default();
+        let mut v = voice16(&[8192, -8192], 44100);
+        v.playing = true;
+        v.looping = true;
+        mx.voices.insert(1, v);
+        let mut out = [0i16; 8];
+        mx.mix(&mut out);
+        assert_eq!(out[0], 8191);
+        assert_eq!(out[2], -8191);
+        assert_eq!(out[4], 8191, "wrapped back to the start");
+        assert!(mx.voices[&1].playing);
+    }
+
+    #[test]
+    fn pan_attenuates_the_far_side_and_frequency_changes_speed() {
+        let mut mx = Mixer::default();
+        let mut v = voice16(&[20000; 64], 44100);
+        v.playing = true;
+        v.pan = 2000; // right: left drops 20 dB
+        mx.voices.insert(1, v);
+        let mut out = [0i16; 2];
+        mx.mix(&mut out);
+        assert!(out[1] > 19000 && (out[0] - out[1] / 10).abs() < 10, "{out:?}");
+
+        let mut mx = Mixer::default();
+        let mut v = voice16(&[0, 1000, 2000, 3000], 44100);
+        v.playing = true;
+        v.freq = Some(88200); // twice as fast: every other frame
+        mx.voices.insert(1, v);
+        let mut out = [0i16; 4];
+        mx.mix(&mut out);
+        assert_eq!((out[0], out[2]), (0, 1999));
+    }
+
+    #[test]
+    fn cd_track_plays_with_volume_and_clears_at_the_end() {
+        let mut mx = Mixer::default();
+        let data: Vec<u8> = [16384i16, -16384, 16384, -16384].iter().flat_map(|s| s.to_le_bytes()).collect();
+        mx.cd = Some(Cd { data: Arc::new(data), pos: 0 });
+        mx.cd_volume = 0.5;
+        let mut out = [0i16; 6];
+        mx.mix(&mut out);
+        assert_eq!(out[..4], [8191, -8191, 8191, -8191]);
+        assert_eq!(out[4..], [0, 0]);
+        assert!(mx.cd.is_none());
+    }
+
+    #[test]
+    fn output_is_clipped_not_wrapped() {
+        let mut mx = Mixer::default();
+        for id in 0..3 {
+            let mut v = voice16(&[30000; 4], 44100);
+            v.playing = true;
+            mx.voices.insert(id, v);
+        }
+        let mut out = [0i16; 2];
+        mx.mix(&mut out);
+        assert_eq!(out, [32767, 32767]);
+    }
+}

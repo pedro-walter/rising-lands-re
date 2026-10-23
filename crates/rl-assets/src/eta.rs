@@ -149,3 +149,99 @@ impl Map {
         self.tiles[y * MAP_SIZE + x]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put16(d: &mut [u8], at: usize, v: u16) {
+        d[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// A 64x48 map with one building and two units.
+    fn sample() -> Vec<u8> {
+        let mut d = vec![0u8; 0x50030];
+        d[..4].copy_from_slice(b"V0.3");
+        d[LAYER0] = 0x11;
+        d[0x10000 + 2 * (3 * 256 + 5)] = 0x34;
+        d[0x10000 + 2 * (3 * 256 + 5) + 1] = 0x12;
+        d[LAYER0 + 0x30000] = b'B';
+        d[LAYER0 + 0x40000] = 0x44;
+        for i in 0..12 {
+            put16(&mut d, 0x50004 + i * 2, 100 + i as u16);
+        }
+        put16(&mut d, 0x5001c, 64);
+        put16(&mut d, 0x5001e, 48);
+        for c in 0..4 {
+            put16(&mut d, 0x50020 + c * 4, 10 + c as u16);
+            put16(&mut d, 0x50022 + c * 4, 20 + c as u16);
+        }
+        // One building: slot 7, cell (9, 4), clan 2, kind 2 (Sanctuaire).
+        d.extend_from_slice(&[1, 0, 204, 0]);
+        let mut b = vec![0u8; 206];
+        put16(&mut b, 0, 7);
+        put16(&mut b, 2 + 2, 4 * 256 + 9);
+        b[2 + 4] = 2;
+        put16(&mut b, 2 + 8, 2);
+        d.extend_from_slice(&b);
+        // Two units (784-byte records).
+        d.extend_from_slice(&[2, 0, 0x10, 0x03]);
+        for (id, clan, kind, x, y) in [(1u16, 0u8, 5u8, 30u8, 31u8), (2, 3, 6, 40, 41)] {
+            let mut u = vec![0u8; 786];
+            put16(&mut u, 0, id);
+            u[2] = clan;
+            u[3] = kind;
+            u[2 + 8] = x;
+            u[2 + 9] = y;
+            d.extend_from_slice(&u);
+        }
+        d
+    }
+
+    #[test]
+    fn parses_layers_resources_and_entities() {
+        let m = Map::parse(&sample()).unwrap();
+        assert_eq!(m.version, "V0.3");
+        assert_eq!((m.width, m.height), (64, 48));
+        assert_eq!(m.layer0[0], 0x11);
+        assert_eq!(m.layer2[0], b'B');
+        assert_eq!(m.layer3[0], 0x44);
+        assert_eq!(m.tile(5, 3), 0x1234);
+        assert_eq!(m.resources[0], [100, 101, 102, 103]);
+        assert_eq!(m.resources[2], [108, 109, 110, 111]);
+        assert_eq!(m.starts[3], (13, 23));
+        let b = &m.buildings[0];
+        assert_eq!((b.slot, b.clan, b.kind, b.x, b.y), (7, 2, 2, 9, 4));
+        assert_eq!(b.raw.len(), 204);
+        assert_eq!(m.units.len(), 2);
+        let u = &m.units[1];
+        assert_eq!((u.id, u.clan, u.kind, u.x, u.y), (2, 3, 6, 40, 41));
+        assert_eq!(u.raw.len(), 784);
+    }
+
+    #[test]
+    fn rejects_bad_input() {
+        assert!(matches!(Map::parse(&[0; 100]), Err(Error::Truncated(_))));
+        let mut d = sample();
+        d[0] = b'X';
+        assert!(matches!(Map::parse(&d), Err(Error::BadMagic("ETA"))));
+        let mut d = sample();
+        put16(&mut d, 0x5001c, 0);
+        assert!(matches!(Map::parse(&d), Err(Error::Corrupt(_))));
+        put16(&mut d, 0x5001c, 257);
+        assert!(matches!(Map::parse(&d), Err(Error::Corrupt(_))));
+        let mut d = sample();
+        d.truncate(d.len() - 10);
+        assert!(matches!(Map::parse(&d), Err(Error::Truncated("ETA units"))));
+        let mut d = sample();
+        d.truncate(0x50030 + 100);
+        assert!(matches!(Map::parse(&d), Err(Error::Truncated("ETA buildings"))));
+    }
+
+    #[test]
+    fn rejects_tiny_record_sizes() {
+        let mut d = sample();
+        put16(&mut d, 0x50032, 4);
+        assert!(Map::parse(&d).is_err());
+    }
+}

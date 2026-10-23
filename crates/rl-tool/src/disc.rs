@@ -139,3 +139,111 @@ impl Disc {
         Ok(n)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("rl-disc-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn record(name: &[u8], lba: u32, len: u32, dir: bool) -> Vec<u8> {
+        let mut r = vec![0u8; 33 + name.len() + (name.len() + 1) % 2];
+        r[0] = r.len() as u8;
+        r[2..6].copy_from_slice(&lba.to_le_bytes());
+        r[10..14].copy_from_slice(&len.to_le_bytes());
+        r[25] = if dir { 2 } else { 0 };
+        r[32] = name.len() as u8;
+        r[33..33 + name.len()].copy_from_slice(name);
+        r
+    }
+
+    /// Mode 2 image, 45 sectors: ISO at the start, audio tracks at sectors 40..42 and 42..45.
+    /// Root (2 sectors, 18-19): `.`, `..`, README.TXT;1, NOEXT.;1, SUB/, DIRECTX/ (second sector).
+    fn image() -> Vec<u8> {
+        let mut img = vec![0u8; 45 * RAW];
+        let mut put = |lba: usize, data: &[u8]| img[lba * RAW + USER_OFFSET..lba * RAW + USER_OFFSET + data.len()].copy_from_slice(data);
+        let mut pvd = vec![0u8; 190];
+        pvd[1..6].copy_from_slice(b"CD001");
+        pvd[156..190].copy_from_slice(&record(&[0], 18, 4096, true)[..34]);
+        put(16, &pvd);
+        let mut root1 = record(&[0], 18, 4096, true);
+        root1.extend(record(&[1], 18, 4096, true));
+        root1.extend(record(b"README.TXT;1", 20, 5, false));
+        root1.extend(record(b"NOEXT.;1", 21, 3, false));
+        put(18, &root1);
+        let mut root2 = record(b"SUB", 22, 2048, true);
+        root2.extend(record(b"DIRECTX", 24, 2048, true));
+        put(19, &root2);
+        put(20, b"hello");
+        put(21, b"abc");
+        put(22, &record(b"BIG.BIN;1", 25, 3000, false));
+        put(24, &record(b"SKIPPED.TXT;1", 23, 1, false));
+        put(23, b"x");
+        let big: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        put(25, &big[..2048]);
+        put(26, &big[2048..]);
+        for lba in 40..45 {
+            img[lba * RAW..(lba + 1) * RAW].fill(lba as u8);
+        }
+        img
+    }
+
+    fn disc(name: &str) -> (std::path::PathBuf, Disc) {
+        let d = tmp(name);
+        fs::write(d.join("game.bin"), image()).unwrap();
+        let disc = Disc::open(&d.join("game.bin")).unwrap();
+        (d, disc)
+    }
+
+    #[test]
+    fn extracts_files_recursively_skipping_named_top_level_dirs() {
+        let (d, disc) = disc("extract");
+        let out = d.join("out");
+        assert_eq!(disc.extract(&out, &["directx"]).unwrap(), 3);
+        assert_eq!(fs::read(out.join("README.TXT")).unwrap(), b"hello");
+        assert_eq!(fs::read(out.join("NOEXT")).unwrap(), b"abc", "version suffix and trailing dot are dropped");
+        let big = fs::read(out.join("SUB/BIG.BIN")).unwrap();
+        assert_eq!(big.len(), 3000);
+        assert_eq!(big[2999], (2999 % 251) as u8, "files spanning sectors are joined");
+        assert!(!out.join("DIRECTX").exists());
+        // Without the skip list, the nested dir comes out too.
+        assert_eq!(disc.extract(&d.join("all"), &[]).unwrap(), 4);
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn rejects_images_that_are_not_iso9660_or_are_too_short() {
+        let d = tmp("bad");
+        fs::write(d.join("a.bin"), vec![0u8; 20 * RAW]).unwrap();
+        let e = Disc::open(&d.join("a.bin")).unwrap().extract(&d.join("o"), &[]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+        fs::write(d.join("b.bin"), vec![0u8; 100]).unwrap();
+        let e = Disc::open(&d.join("b.bin")).unwrap().extract(&d.join("o"), &[]).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(Disc::open(&d.join("missing.bin")).is_err());
+        fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn extracts_audio_tracks_up_to_the_next_index() {
+        let (d, disc) = disc("audio");
+        let cue = d.join("game.cue");
+        fs::write(&cue, "FILE \"game.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 00 00:00:38\n    INDEX 01 00:00:40\n  TRACK 03 AUDIO\n    INDEX 01 00:00:42\n").unwrap();
+        assert_eq!(disc.extract_audio(&cue, &d).unwrap(), 2);
+        let t2 = fs::read(d.join("track02.raw")).unwrap();
+        assert_eq!(t2.len(), 2 * RAW);
+        assert_eq!((t2[0], t2[RAW]), (40, 41));
+        let t3 = fs::read(d.join("track03.raw")).unwrap();
+        assert_eq!(t3.len(), 3 * RAW, "the last track runs to the end of the image");
+        assert!(!d.join("track01.raw").exists());
+        // A track that starts beyond the image is an error, not a panic.
+        fs::write(&cue, "TRACK 01 AUDIO\nINDEX 01 10:00:00\nTRACK 02 AUDIO\nINDEX 01 10:00:10\n").unwrap();
+        assert!(disc.extract_audio(&cue, &d).is_err());
+        fs::remove_dir_all(d).unwrap();
+    }
+}

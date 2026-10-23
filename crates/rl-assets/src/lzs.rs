@@ -57,3 +57,43 @@ fn lzss(src: &[u8], total: usize) -> Result<Vec<u8>, Error> {
     out.truncate(total);
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(w: u16, h: u16, data: &[u8]) -> Vec<u8> {
+        let mut f = b"LZSS".to_vec();
+        f.extend_from_slice(&w.to_le_bytes());
+        f.extend_from_slice(&h.to_le_bytes());
+        f.extend_from_slice(b"CMAP");
+        f.extend((0..768).map(|i| (i / 3) as u8));
+        f.extend_from_slice(b"FORM");
+        f.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        f.extend_from_slice(data);
+        f
+    }
+
+    #[test]
+    fn literals_and_back_reference() {
+        // Three literals, then a 5-byte copy from window position 4078 (overlapping its own output).
+        let s = parse(&file(4, 2, &[0b0000_0111, b'a', b'b', b'c', 0xee, 0xf2])).unwrap();
+        assert_eq!((s.width, s.height), (4, 2));
+        assert_eq!(s.pixels, b"abcabcab");
+        assert_eq!(s.palette.rgba(7), [7, 7, 7, 255]);
+    }
+
+    #[test]
+    fn rejects_bad_headers_and_truncation() {
+        assert!(matches!(parse(b"nope"), Err(Error::BadMagic("LZS"))));
+        let mut f = file(1, 1, &[1, 0]);
+        f[8] = b'X';
+        assert!(matches!(parse(&f), Err(Error::BadMagic("LZS CMAP"))));
+        let mut f = file(1, 1, &[1, 0]);
+        f[780] = b'X';
+        assert!(matches!(parse(&f), Err(Error::BadMagic("LZS FORM"))));
+        assert!(matches!(parse(&file(4, 1, &[0xff, 1, 2])), Err(Error::Truncated(_))));
+        assert!(matches!(parse(&file(4, 1, &[0x00, 1])), Err(Error::Truncated(_))));
+        assert!(parse(&file(1, 1, &[1, 0])[..500]).is_err());
+    }
+}

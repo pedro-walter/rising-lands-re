@@ -341,3 +341,152 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
         _ => format!("COMANDOS: {HELP}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::testing::bare_uc;
+
+    /// Guest with player records at 0x590000 and the resource table zeroed.
+    fn game() -> Uc<'static> {
+        let mut uc = bare_uc();
+        wr32(&mut uc, PLAYERS, 0x59_0000);
+        uc
+    }
+
+    #[test]
+    fn parsing_helpers() {
+        assert_eq!(hex("0x4e2ea8"), Some(0x4e2ea8));
+        assert_eq!(hex("ff"), Some(255));
+        assert_eq!(hex("zz"), None);
+        assert_eq!([kind_of("scrap"), kind_of("food"), kind_of("pedras"), kind_of("3"), kind_of("x")], [Some(0), Some(1), Some(2), Some(3), None]);
+        assert_eq!(res_addr(1, 2), RES_TABLE + 9 * 8 + 2);
+    }
+
+    #[test]
+    fn call_guest_passes_registers_and_stack_and_restores_state() {
+        let mut uc = game();
+        // add eax, edx ; add eax, [esp+4] ; ret
+        wr_bytes(&mut uc, 0x40_1000, &[0x01, 0xd0, 0x03, 0x44, 0x24, 0x04, 0xc3]);
+        let esp = reg(&uc, R::ESP);
+        assert_eq!(call_guest(&mut uc, 0x40_1000, [1, 20, 0, 0], &[300]), Ok(321));
+        assert_eq!(reg(&uc, R::ESP), esp);
+    }
+
+    #[test]
+    fn call_guest_reports_the_faulting_address() {
+        let mut uc = game();
+        // mov eax, [0x12345678] ; ret
+        wr_bytes(&mut uc, 0x40_1000, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        let e = call_guest(&mut uc, 0x40_1000, [0; 4], &[]).unwrap_err();
+        assert!(e.starts_with("falha no jogo em 0x401000"), "{e}");
+    }
+
+    #[test]
+    fn res_sets_and_reads_stock() {
+        let mut uc = game();
+        assert_eq!(run(&mut uc, "res comida 50"), "comida = 50");
+        assert_eq!(rd_bytes(&uc, res_addr(1, 0), 2), 50u16.to_le_bytes());
+        assert_eq!(run(&mut uc, "res pedra 99999 1"), "QUANTIDADE INVALIDA");
+        run(&mut uc, "res pedra 20000 1");
+        assert_eq!(rd_bytes(&uc, res_addr(2, 1), 2), 9999u16.to_le_bytes(), "capped at 9999");
+        assert_eq!(run(&mut uc, "res all 7"), "TODOS = 7");
+        assert_eq!(run(&mut uc, "res"), "metal 7, comida 7, pedra 7, extra 7");
+        assert_eq!(run(&mut uc, "res ouro 1"), "RECURSO DESCONHECIDO: ouro");
+    }
+
+    #[test]
+    fn peek_and_poke() {
+        let mut uc = game();
+        assert_eq!(run(&mut uc, "poke 401000 258 2"), "0x401000 = 258");
+        assert_eq!(run(&mut uc, "peek 0x401000 4"), "02 01 00 00");
+        run(&mut uc, "poke 401010 65537 4");
+        assert_eq!(rd32(&uc, 0x40_1010), 65537);
+        run(&mut uc, "poke 401020 300 1");
+        assert_eq!(rd_bytes(&uc, 0x40_1020, 2), [44, 0], "width 1 keeps only the low byte");
+        assert_eq!(run(&mut uc, "peek zz"), "ENDERECO INVALIDO");
+        assert_eq!(run(&mut uc, "poke 401000 abc"), "ARGUMENTO INVALIDO");
+    }
+
+    #[test]
+    fn attitude_and_alliance_bits() {
+        let mut uc = game();
+        assert_eq!(run(&mut uc, "att 1 2 -30"), "atitude[1][2] = -30");
+        assert_eq!(run(&mut uc, "att 1 2"), "atitude[1][2] = -30");
+        assert_eq!(rd_bytes(&uc, 0x59_0000 + 0x14 + 0xc + 4, 2), (-30i16).to_le_bytes());
+        assert_eq!(run(&mut uc, "ally 0 2 1"), "0 aliado de 2: 1");
+        assert_eq!(run(&mut uc, "ally 0 3 1"), "0 aliado de 3: 1");
+        assert_eq!(rd_bytes(&uc, 0x59_0006, 1), [0b1100]);
+        assert_eq!(run(&mut uc, "ally 0 2 0"), "0 aliado de 2: 0");
+        assert_eq!(run(&mut uc, "ally 0 3"), "0 aliado de 3: 1");
+        assert_eq!(run(&mut uc, "att 4 0"), "CLA 0-3");
+        assert_eq!(run(&mut uc, "ally 0 9"), "CLA 0-3");
+        assert_eq!(run(&mut uc, "att x y"), "USO: att <a> <b> [valor]");
+        assert_eq!(run(&mut uc, "clas"), "OK");
+    }
+
+    #[test]
+    fn instant_toggle_and_tick_finishes_buildings() {
+        let mut uc = game();
+        assert_eq!(run(&mut uc, "instant"), "CONSTRUCAO INSTANTANEA LIGADA");
+        assert!(uc.get_data().instant_build);
+        // Slot 3 under construction (state 2, type 1, progress 0, build time 10).
+        let slot = BLD_TABLE + 3 * BLD_SIZE;
+        wr_bytes(&mut uc, slot + 5, &[2]);
+        wr_bytes(&mut uc, slot + 8, &[1]);
+        wr_bytes(&mut uc, BLD_TIME + 0x34, &10u16.to_le_bytes());
+        // A finished building must be left alone.
+        wr_bytes(&mut uc, BLD_TABLE + 5, &[5]);
+        tick(&mut uc);
+        assert_eq!(rd_bytes(&uc, slot + 0xa, 2), 14u16.to_le_bytes());
+        assert_eq!(rd_bytes(&uc, BLD_TABLE + 0xa, 2), [0, 0]);
+        assert_eq!(run(&mut uc, "instant off"), "CONSTRUCAO INSTANTANEA DESLIGADA");
+        wr_bytes(&mut uc, slot + 0xa, &[0, 0]);
+        tick(&mut uc);
+        assert_eq!(rd_bytes(&uc, slot + 0xa, 2), [0, 0]);
+    }
+
+    #[test]
+    fn snapshot_and_diff_count_changed_words() {
+        let mut uc = game();
+        run(&mut uc, "snap");
+        wr_bytes(&mut uc, 0x40_2000, &5u16.to_le_bytes());
+        wr_bytes(&mut uc, 0x40_2100, &[1, 0, 2, 0]);
+        assert_eq!(run(&mut uc, "diff up"), "UP: 3 PALAVRAS");
+        assert_eq!(run(&mut uc, "diff up"), "UP: 0 PALAVRAS", "snapshot is renewed");
+        run(&mut uc, "snap");
+        wr_bytes(&mut uc, 0x40_2000, &9u16.to_le_bytes());
+        assert_eq!(run(&mut uc, "diff"), "DIFF: 1 PALAVRAS");
+    }
+
+    #[test]
+    fn tab_lists_non_empty_records() {
+        let mut uc = game();
+        wr_bytes(&mut uc, 0x40_3008, &[7]);
+        assert_eq!(run(&mut uc, "tab 403000 8 4"), "1 REGISTROS EM 0x403000");
+        wr32(&mut uc, 0x40_3100, 0x40_3000);
+        assert_eq!(run(&mut uc, "tab 403100 8 4 deref"), "1 REGISTROS EM 0x403000");
+        assert_eq!(run(&mut uc, "tab zz 8 4"), "USO: tab <addr> <tamanho> <n> [deref]");
+    }
+
+    #[test]
+    fn ents_reports_used_slots_and_first_free() {
+        let mut uc = game();
+        wr_bytes(&mut uc, BLD_TABLE + 5, &[5]);
+        assert_eq!(run(&mut uc, "ents"), "1 ENTIDADES, PRIMEIRO LIVRE: Some(1)");
+    }
+
+    #[test]
+    fn usage_errors_and_unknown_commands() {
+        let mut uc = game();
+        assert_eq!(run(&mut uc, ""), "");
+        assert!(run(&mut uc, "nada").starts_with("COMANDOS: res "));
+        assert_eq!(run(&mut uc, "spawn 99"), "USO: spawn <tipo 0-25> [x y] [jogador]");
+        assert_eq!(run(&mut uc, "grudge a b c"), "USO: grudge <vitima> <ofensor> <evento>");
+        assert_eq!(run(&mut uc, "aiexec x"), "USO: aiexec <jogador> [n]");
+        assert_eq!(run(&mut uc, "diplo a b"), "USO: diplo <proponente> <ia>");
+        assert!(run(&mut uc, "tech nope 3").starts_with("AREA: "));
+        assert_eq!(run(&mut uc, "tech agricultura x"), "QUANTIDADE INVALIDA");
+        assert_eq!(run(&mut uc, "tech"), "agricultura 0, militar 0, civil 0, religiao 0");
+    }
+}

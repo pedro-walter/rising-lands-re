@@ -92,3 +92,71 @@ pub fn unmap(m: &Mapping) {
     let args = format!("<NewRemoteHost></NewRemoteHost><NewExternalPort>{}</NewExternalPort><NewProtocol>TCP</NewProtocol>", m.port);
     let _ = soap(m, "DeletePortMapping", &args);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// Serves one canned HTTP response per connection and reports the requests it saw.
+    fn fake_router(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = l.local_addr().unwrap().to_string();
+        let h = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for resp in responses {
+                let (mut s, _) = l.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = s.read(&mut buf).unwrap();
+                seen.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                s.write_all(resp.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (host, h)
+    }
+
+    fn mapping(host: &str) -> Mapping {
+        Mapping { external_ip: None, port: 47624, host: host.into(), control_path: "/ctl".into(), service: "urn:test:1".into() }
+    }
+
+    #[test]
+    fn between_extracts_the_first_delimited_slice() {
+        assert_eq!(between("<a>x</a><a>y</a>", "<a>", "</a>"), Some("x"));
+        assert_eq!(between("no tags", "<a>", "</a>"), None);
+        assert_eq!(between("<a>open", "<a>", "</a>"), None);
+        assert_eq!(between("<a></a>", "<a>", "</a>"), Some(""));
+    }
+
+    #[test]
+    fn soap_posts_the_action_and_accepts_only_200() {
+        let (host, h) = fake_router(vec!["HTTP/1.1 200 OK\r\n\r\n<NewExternalIPAddress>1.2.3.4</NewExternalIPAddress>".into(), "HTTP/1.1 500 Error\r\n\r\n".into()]);
+        let m = mapping(&host);
+        let ok = soap(&m, "GetExternalIPAddress", "<x/>").unwrap();
+        assert_eq!(between(&ok, "<NewExternalIPAddress>", "</NewExternalIPAddress>"), Some("1.2.3.4"));
+        assert!(soap(&m, "AddPortMapping", "").is_none());
+        let seen = h.join().unwrap();
+        assert!(seen[0].starts_with("POST /ctl HTTP/1.1"));
+        assert!(seen[0].contains("SOAPAction: \"urn:test:1#GetExternalIPAddress\""));
+        assert!(seen[0].contains("<u:GetExternalIPAddress xmlns:u=\"urn:test:1\"><x/></u:GetExternalIPAddress>"));
+    }
+
+    #[test]
+    fn unmap_sends_a_delete_request_and_survives_failures() {
+        let (host, h) = fake_router(vec!["HTTP/1.1 200 OK\r\n\r\n".into()]);
+        unmap(&mapping(&host));
+        let seen = h.join().unwrap();
+        assert!(seen[0].contains("DeletePortMapping"));
+        assert!(seen[0].contains("<NewExternalPort>47624</NewExternalPort><NewProtocol>TCP</NewProtocol>"));
+        // Nothing listening: no panic, no hang.
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host = dead.local_addr().unwrap().to_string();
+        drop(dead);
+        unmap(&mapping(&host));
+    }
+
+    #[test]
+    fn http_reports_unreachable_hosts_as_none() {
+        assert!(http("not a host", "GET / HTTP/1.1\r\n\r\n").is_none());
+    }
+}

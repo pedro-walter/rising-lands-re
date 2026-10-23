@@ -73,4 +73,32 @@ mod tests {
         assert_eq!(s.int("RAYON"), Some(7));
         assert_eq!(s.get("NAME"), Some("SOLDADO"));
     }
+
+    #[test]
+    fn repeated_keys_keep_file_order_and_lookups_are_case_insensitive() {
+        let ini = Ini::parse(b"[A]\r\nCOUT=1\r\nCOUT=2\r\n[b]\r\nx=y\r\n");
+        assert_eq!(ini.sections.len(), 2);
+        let a = ini.section("a").unwrap();
+        assert_eq!(a.entries, [("COUT".into(), "1".into()), ("COUT".into(), "2".into())]);
+        assert_eq!(a.get("cout"), Some("1"));
+        assert_eq!(ini.section("B").unwrap().get("X"), Some("y"));
+    }
+
+    #[test]
+    fn missing_and_malformed_values() {
+        let ini = Ini::parse(b"orphan=1\n[S]\nN=a,b\nE=\nno equals here\n");
+        assert!(ini.section("nope").is_none());
+        let s = ini.section("S").unwrap();
+        assert_eq!(s.ints("N"), None);
+        assert_eq!(s.int("N"), None);
+        assert_eq!(s.int("missing"), None);
+        assert_eq!(s.get("E"), Some(""));
+        assert_eq!(s.entries.len(), 2, "lines without `=` and keys before any section are dropped");
+    }
+
+    #[test]
+    fn latin1_bytes_map_to_code_points() {
+        let ini = Ini::parse(b"[S]\nNAME=Armaz\xe9m\n");
+        assert_eq!(ini.section("S").unwrap().get("NAME"), Some("Armaz\u{e9}m"));
+    }
 }

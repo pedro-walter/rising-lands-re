@@ -81,3 +81,53 @@ impl Sprite {
         Ok(Bitmap { width: self.width, height: self.height, pixels, opaque })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn archive(sprites: &[(u16, u16, &[u8])]) -> Vec<u8> {
+        let mut d = (sprites.len() as u16).to_le_bytes().to_vec();
+        for (w, h, data) in sprites {
+            d.extend_from_slice(&w.to_le_bytes());
+            d.extend_from_slice(&h.to_le_bytes());
+            d.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            d.extend_from_slice(data);
+        }
+        d
+    }
+
+    #[test]
+    fn decodes_skips_and_runs() {
+        // skip 1, copy 2 (0xfe = 256 - 2), skip 1.
+        let a = SpriteArchive::parse(&archive(&[(4, 1, &[1, 0xfe, 7, 8, 1])])).unwrap();
+        let b = a.sprites[0].decode().unwrap();
+        assert_eq!((b.width, b.height), (4, 1));
+        assert_eq!(b.pixels, [0, 7, 8, 0]);
+        assert_eq!(b.opaque, [false, true, true, false]);
+    }
+
+    #[test]
+    fn tokens_wrap_across_rows() {
+        let a = SpriteArchive::parse(&archive(&[(2, 2, &[0xfd, 1, 2, 3, 1])])).unwrap();
+        assert_eq!(a.sprites[0].decode().unwrap().pixels, [1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn archive_errors() {
+        assert!(SpriteArchive::parse(&[]).is_err());
+        assert!(matches!(SpriteArchive::parse(&[1, 0, 1, 0, 1, 0, 9, 0, 0, 0]), Err(Error::Truncated(_))));
+        let mut d = archive(&[(1, 1, &[0xff, 5])]);
+        d.push(0);
+        assert!(matches!(SpriteArchive::parse(&d), Err(Error::Corrupt(_))));
+        assert_eq!(SpriteArchive::parse(&archive(&[])).unwrap().sprites.len(), 0);
+    }
+
+    #[test]
+    fn sprite_errors() {
+        let dec = |w, h, data: &[u8]| SpriteArchive::parse(&archive(&[(w, h, data)])).unwrap().sprites[0].decode();
+        assert!(matches!(dec(4, 1, &[0xfe, 7]), Err(Error::Truncated(_))));
+        assert!(matches!(dec(1, 1, &[0xfe, 7, 8]), Err(Error::Corrupt(_))));
+        assert!(matches!(dec(4, 1, &[1, 0xff, 7]), Err(Error::Corrupt(_))));
+    }
+}

@@ -200,3 +200,148 @@ fn lookup(dir: &Path, name: &str) -> Option<PathBuf> {
     }
     fs::read_dir(dir).ok()?.flatten().find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name)).map(|e| e.path())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Dirs {
+        root: PathBuf,
+        vfs: Vfs,
+    }
+
+    impl Drop for Dirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// install: `Maps/Level1.TXT`, `Rising.INI`; disc: `Data/Movie.AVI`; empty overlay.
+    fn setup(name: &str) -> Dirs {
+        let root = std::env::temp_dir().join(format!("rl-vfs-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["install/Maps", "disc/Data", "user"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        fs::write(root.join("install/Maps/Level1.TXT"), b"one").unwrap();
+        fs::write(root.join("install/Rising.INI"), b"ini").unwrap();
+        fs::write(root.join("disc/Data/Movie.AVI"), b"avi").unwrap();
+        let vfs = Vfs::new(root.join("install"), root.join("disc"), root.join("user"));
+        Dirs { root, vfs }
+    }
+
+    #[test]
+    fn wildcard_patterns() {
+        assert!(pattern_match(b"*.txt", b"level1.txt"));
+        assert!(pattern_match(b"LEVEL?.TXT", b"level1.txt"));
+        assert!(pattern_match(b"*", b""));
+        assert!(pattern_match(b"a*b*c", b"axxbyyc"));
+        assert!(!pattern_match(b"*.txt", b"level1.ini"));
+        assert!(!pattern_match(b"a?", b"a"));
+        assert!(!pattern_match(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn normalizes_paths_against_the_cwd() {
+        let d = setup("norm");
+        let n = |p| d.vfs.normalize(p);
+        assert_eq!(n("c:\\Rising\\Maps"), ('C', vec!["Rising".into(), "Maps".into()]));
+        assert_eq!(n("Maps/x.txt"), ('C', vec!["RISING".into(), "Maps".into(), "x.txt".into()]));
+        assert_eq!(n("D:\\a\\.\\b\\..\\c"), ('D', vec!["a".into(), "c".into()]));
+        assert_eq!(n("\\x"), ('C', vec!["x".into()]));
+        assert_eq!(n("..\\x"), ('C', vec!["x".into()]));
+    }
+
+    #[test]
+    fn resolves_case_insensitively_across_drives() {
+        let d = setup("resolve");
+        let v = &d.vfs;
+        assert_eq!(v.resolve("C:\\RISING\\maps\\LEVEL1.txt"), Some(d.root.join("install/Maps/Level1.TXT")));
+        assert_eq!(v.resolve("rising.ini"), Some(d.root.join("install/Rising.INI")));
+        assert_eq!(v.resolve("D:\\data\\movie.avi"), Some(d.root.join("disc/Data/Movie.AVI")));
+        assert_eq!(v.resolve("C:\\RISING"), Some(d.root.join("user")), "the overlay root wins when it exists");
+        assert_eq!(v.resolve("C:\\nope.txt"), None);
+        assert_eq!(v.resolve("E:\\x"), None);
+    }
+
+    #[test]
+    fn reads_and_closes_handles() {
+        let mut d = setup("read");
+        let h = d.vfs.open("Rising.ini", false, false).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(d.vfs.file(h).unwrap(), &mut s).unwrap();
+        assert_eq!(s, "ini");
+        assert!(d.vfs.close(h));
+        assert!(!d.vfs.close(h));
+        assert!(d.vfs.file(h).is_none());
+        assert!(d.vfs.open("missing.ini", false, false).is_none());
+        let (a, b) = (d.vfs.open("Rising.ini", false, false).unwrap(), d.vfs.open("Rising.ini", false, false).unwrap());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn writes_go_to_the_overlay_copy_on_write() {
+        let mut d = setup("cow");
+        let h = d.vfs.open("C:\\RISING\\Maps\\level1.txt", true, false).unwrap();
+        std::io::Write::write_all(d.vfs.file(h).unwrap(), b"TWO").unwrap();
+        d.vfs.close(h);
+        assert_eq!(fs::read(d.root.join("install/Maps/Level1.TXT")).unwrap(), b"one", "install untouched");
+        assert_eq!(fs::read(d.root.join("user/Maps/level1.txt")).unwrap(), b"TWO", "the overlay copy keeps the name the guest asked for");
+        // The overlay now wins on reads.
+        let h = d.vfs.open("Maps\\Level1.TXT", false, false).unwrap();
+        let mut s = String::new();
+        std::io::Read::read_to_string(d.vfs.file(h).unwrap(), &mut s).unwrap();
+        assert_eq!(s, "TWO");
+        // The disc is read-only: no overlay path for it, and no writable open.
+        assert!(d.vfs.open("D:\\Data\\Movie.AVI", true, false).is_none());
+        assert!(d.vfs.open("nothing.sav", true, false).is_none(), "cannot copy a file that does not exist");
+    }
+
+    #[test]
+    fn create_truncates_and_makes_directories() {
+        let mut d = setup("create");
+        let h = d.vfs.open("C:\\RISING\\Saves\\a.sav", true, true).unwrap();
+        std::io::Write::write_all(d.vfs.file(h).unwrap(), b"first").unwrap();
+        d.vfs.close(h);
+        let h = d.vfs.open("saves\\A.SAV", true, true).unwrap();
+        std::io::Write::write_all(d.vfs.file(h).unwrap(), b"2").unwrap();
+        d.vfs.close(h);
+        assert_eq!(fs::read(d.root.join("user/Saves/a.sav")).unwrap(), b"2");
+        assert!(d.vfs.open("D:\\new.bin", true, true).is_none());
+    }
+
+    #[test]
+    fn find_merges_overlay_and_install_without_duplicates() {
+        let mut d = setup("find");
+        fs::write(d.root.join("user/extra.ini"), b"x").unwrap();
+        fs::write(d.root.join("user/RISING.INI"), b"override").unwrap();
+        let names = |f: Find| f.entries.iter().map(|p| p.file_name().unwrap().to_string_lossy().to_ascii_lowercase()).collect::<Vec<_>>();
+        assert_eq!(names(d.vfs.find("C:\\RISING\\*.ini")), ["rising.ini", "extra.ini"]); // sorted by host path: RISING.INI < extra.ini
+        assert_eq!(names(d.vfs.find("Maps\\level?.txt")), ["level1.txt"]);
+        assert_eq!(names(d.vfs.find("D:\\Data\\*.*")), ["movie.avi"]);
+        assert_eq!(names(d.vfs.find("D:\\Data\\*")), ["movie.avi"]);
+        assert!(d.vfs.find("C:\\RISING\\*.zzz").entries.is_empty());
+        assert_eq!(d.vfs.find("*.ini").next, 0);
+        d.vfs.cwd = "C:\\RISING\\Maps".into();
+        assert_eq!(names(d.vfs.find("*.txt")), ["level1.txt"]);
+    }
+
+    #[test]
+    fn text_fixes_are_applied_on_read_without_touching_the_install() {
+        let mut d = setup("fix");
+        let original = b"Missao\r\n- Proteja uma caverna.\r\n- Estoque 50 sacos de comida e\r\n50 sacos de pedras na caverna.\r\nfim";
+        fs::write(d.root.join("install/MONDE01.TXT"), original).unwrap();
+        let h = d.vfs.open("monde01.txt", false, false).unwrap();
+        let mut s = Vec::new();
+        std::io::Read::read_to_end(d.vfs.file(h).unwrap(), &mut s).unwrap();
+        let s = String::from_utf8_lossy(&s).into_owned();
+        assert!(s.contains("Construa um armaz"), "{s}");
+        assert!(!s.contains("caverna"));
+        assert_eq!(fs::read(d.root.join("install/MONDE01.TXT")).unwrap(), original);
+        // A file with no matching text is read straight from the install.
+        fs::write(d.root.join("install/monde02.txt"), b"nothing to fix").unwrap();
+        assert_eq!(d.vfs.patched(d.root.join("install/monde02.txt")), d.root.join("install/monde02.txt"));
+        fs::write(d.root.join("install/other.txt"), b"x").unwrap();
+        assert_eq!(d.vfs.patched(d.root.join("install/other.txt")), d.root.join("install/other.txt"));
+    }
+}

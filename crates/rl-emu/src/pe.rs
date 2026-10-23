@@ -96,3 +96,98 @@ pub fn load(d: &[u8]) -> Result<Image, Box<dyn Error>> {
     }
     Ok(Image { base, size, entry: base + entry_rva, chunks, imports })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put32(d: &mut [u8], at: usize, v: u32) {
+        d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    /// PE32 at base 0x400000 with a `.text` (RVA 0x1000, raw 0x200) and an `.idata` (RVA 0x2000, raw 0x400)
+    /// importing `Foo` and ordinal 5 from `K.DLL`, plus an uninitialised `.bss` (RVA 0x3000).
+    fn image() -> Vec<u8> {
+        let mut d = vec![0u8; 0x600];
+        d[..2].copy_from_slice(b"MZ");
+        put32(&mut d, 0x3c, 0x40);
+        d[0x40..0x44].copy_from_slice(b"PE\0\0");
+        d[0x46..0x48].copy_from_slice(&3u16.to_le_bytes()); // sections
+        d[0x54..0x56].copy_from_slice(&0xe0u16.to_le_bytes()); // optional header size
+        let opt = 0x58;
+        d[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes());
+        put32(&mut d, opt + 16, 0x1010); // entry
+        put32(&mut d, opt + 28, 0x40_0000); // base
+        put32(&mut d, opt + 56, 0x4000); // image size
+        put32(&mut d, opt + 60, 0x200); // headers
+        put32(&mut d, opt + 104, 0x2000); // import directory RVA
+        let sec = |d: &mut Vec<u8>, i: usize, vsize: u32, va: u32, rsize: u32, raw: u32| {
+            let s = opt + 0xe0 + i * 40;
+            put32(d, s + 8, vsize);
+            put32(d, s + 12, va);
+            put32(d, s + 16, rsize);
+            put32(d, s + 20, raw);
+        };
+        sec(&mut d, 0, 0x100, 0x1000, 0x200, 0x200);
+        sec(&mut d, 1, 0x200, 0x2000, 0x200, 0x400);
+        sec(&mut d, 2, 0x1000, 0x3000, 0, 0);
+        d[0x200] = 0xc3;
+        // Import descriptor at RVA 0x2000 (raw 0x400): OFT 0x2040, name 0x2080, FT 0x2090; terminator after it.
+        put32(&mut d, 0x400, 0x2040);
+        put32(&mut d, 0x400 + 12, 0x2080);
+        put32(&mut d, 0x400 + 16, 0x2090);
+        put32(&mut d, 0x440, 0x2060); // OFT[0]: by name
+        put32(&mut d, 0x444, 0x8000_0005); // OFT[1]: ordinal 5
+        d[0x462..0x466].copy_from_slice(b"Foo\0"); // hint u16 + name
+        d[0x480..0x486].copy_from_slice(b"K.DLL\0");
+        d
+    }
+
+    #[test]
+    fn maps_sections_and_lists_imports() {
+        let img = load(&image()).unwrap();
+        assert_eq!((img.base, img.size, img.entry), (0x40_0000, 0x4000, 0x40_1010));
+        assert_eq!(img.chunks.len(), 4);
+        assert_eq!(img.chunks[0].1.len(), 0x200, "headers");
+        assert_eq!(img.chunks[1].0, 0x40_1000);
+        assert_eq!(img.chunks[1].1[0], 0xc3);
+        assert!(img.chunks[3].1.is_empty(), "bss has no file bytes");
+        let names: Vec<_> = img.imports.iter().map(|i| (i.dll.as_str(), i.name.as_str(), i.slot)).collect();
+        assert_eq!(names, [("K.DLL", "Foo", 0x40_2090), ("K.DLL", "#5", 0x40_2094)]);
+    }
+
+    #[test]
+    fn rejects_malformed_images() {
+        let msg = |d: &[u8]| load(d).err().unwrap().to_string();
+        assert_eq!(msg(b"ZM"), "not an MZ executable");
+        let mut d = image();
+        d[0x40] = b'X';
+        assert_eq!(msg(&d), "missing PE signature");
+        let mut d = image();
+        d[0x58] = 0x0b;
+        d[0x59] = 0x02; // PE32+
+        assert_eq!(msg(&d), "not a PE32 image");
+        let mut d = image();
+        put32(&mut d, 0x58 + 104, 0x9000);
+        assert_eq!(msg(&d), "no import table");
+        let mut d = image();
+        put32(&mut d, 0x400 + 12, 0x9000);
+        assert_eq!(msg(&d), "bad import dll name");
+        let mut d = image();
+        put32(&mut d, 0x440, 0x9000);
+        assert_eq!(msg(&d), "bad import name");
+        let mut d = image();
+        put32(&mut d, 0x400, 0x9000);
+        assert_eq!(msg(&d), "bad thunk");
+    }
+
+    #[test]
+    fn falls_back_to_the_first_thunk_when_the_lookup_table_is_empty() {
+        let mut d = image();
+        put32(&mut d, 0x400, 0); // no OFT: the IAT itself holds the names
+        put32(&mut d, 0x490, 0x2060);
+        let img = load(&d).unwrap();
+        assert_eq!(img.imports.len(), 1);
+        assert_eq!(img.imports[0].name, "Foo");
+    }
+}

@@ -120,6 +120,52 @@ pub struct State {
 }
 
 impl State {
+    pub fn new(install: &Path, disc: &Path, userdir: &Path) -> State {
+        State {
+            stubs: Vec::new(),
+            heap_next: HEAP_BASE,
+            heap_sizes: HashMap::new(),
+            heap_free: Default::default(),
+            heap_quarantine: Default::default(),
+            heap_quarantine_bytes: 0,
+            pending: None,
+            skip_once: None,
+            last_hooked: None,
+            frames: Vec::new(),
+            vfs: Vfs::new(install.to_path_buf(), disc.to_path_buf(), userdir.to_path_buf()),
+            classes: HashMap::new(),
+            windows: Vec::new(),
+            msgs: VecDeque::new(),
+            quit: false,
+            start: Instant::now(),
+            tls: vec![0; 64],
+            last_error: 0,
+            com: com::Com::default(),
+            ui: Default::default(),
+            video_open: None,
+            video: None,
+            mixer: Default::default(),
+            cd_tracks: HashMap::new(),
+            cd_format_tmsf: false,
+            finds: HashMap::new(),
+            next_handle: 0x2000,
+            cursor: (0, 0),
+            keys: [false; 256],
+            frame_interval: std::time::Duration::from_secs_f64(
+                1.0 / std::env::var("RL_FPS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| *f > 0.0).unwrap_or(30.0),
+            ),
+            speed: 1.0,
+            click_aligned: false,
+            skip_movies: false,
+            instant_build: false,
+            next_frame: Instant::now(),
+            log_calls: std::env::var_os("RL_LOG_CALLS").is_some(),
+            strings: HashMap::new(),
+            api_counts: HashMap::new(),
+            ini: HashMap::new(),
+        }
+    }
+
     /// First-fit allocation from the guest heap (the memory may be dirty; see [`zeroed_alloc`]).
     pub fn alloc(&mut self, size: u32) -> u32 {
         let size = (size.max(1) + 15) & !15;
@@ -278,49 +324,7 @@ impl Machine {
     pub fn new(exe: &Path, install: &Path, disc: &Path, userdir: &Path) -> Result<Machine, Box<dyn Error>> {
         let bytes = std::fs::read(exe)?;
         let img = pe::load(&bytes)?;
-        let state = State {
-            stubs: Vec::new(),
-            heap_next: HEAP_BASE,
-            heap_sizes: HashMap::new(),
-            heap_free: Default::default(),
-            heap_quarantine: Default::default(),
-            heap_quarantine_bytes: 0,
-            pending: None,
-            skip_once: None,
-            last_hooked: None,
-            frames: Vec::new(),
-            vfs: Vfs::new(install.to_path_buf(), disc.to_path_buf(), userdir.to_path_buf()),
-            classes: HashMap::new(),
-            windows: Vec::new(),
-            msgs: VecDeque::new(),
-            quit: false,
-            start: Instant::now(),
-            tls: vec![0; 64],
-            last_error: 0,
-            com: com::Com::default(),
-            ui: Default::default(),
-            video_open: None,
-            video: None,
-            mixer: Default::default(),
-            cd_tracks: HashMap::new(),
-            cd_format_tmsf: false,
-            finds: HashMap::new(),
-            next_handle: 0x2000,
-            cursor: (0, 0),
-            keys: [false; 256],
-            frame_interval: std::time::Duration::from_secs_f64(
-                1.0 / std::env::var("RL_FPS").ok().and_then(|v| v.parse::<f64>().ok()).filter(|f| *f > 0.0).unwrap_or(30.0),
-            ),
-            speed: 1.0,
-            click_aligned: false,
-            skip_movies: false,
-            instant_build: false,
-            next_frame: Instant::now(),
-            log_calls: std::env::var_os("RL_LOG_CALLS").is_some(),
-            strings: HashMap::new(),
-            api_counts: HashMap::new(),
-            ini: HashMap::new(),
-        };
+        let state = State::new(install, disc, userdir);
         let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, state).map_err(|e| format!("unicorn: {e:?}"))?;
         let map = |uc: &mut Uc, a: u32, s: u32| uc.mem_map(a as u64, s as u64, Prot::ALL).map_err(|e| format!("map {a:#x}: {e:?}"));
         map(&mut uc, img.base, (img.size + 0xfff) & !0xfff)?;
@@ -535,4 +539,124 @@ pub fn stop_with(uc: &mut Uc, a: Action) {
 #[allow(dead_code)]
 pub fn err_name(e: uc_error) -> String {
     format!("{e:?}")
+}
+
+#[cfg(test)]
+pub mod testing {
+    use super::*;
+
+    /// A bare guest: 2 MiB at the PE base (code/data), a stack, and a user dir that does not exist.
+    pub fn bare_uc() -> Uc<'static> {
+        let dir = std::env::temp_dir().join("rl-emu-bare");
+        let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, State::new(&dir, &dir, &dir)).unwrap();
+        uc.mem_map(0x40_0000, 0x20_0000, Prot::ALL).unwrap();
+        uc.mem_map((STACK_TOP - STACK_SIZE) as u64, STACK_SIZE as u64, Prot::ALL).unwrap();
+        set_reg(&mut uc, RegisterX86::ESP, STACK_TOP - 0x1000);
+        uc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::bare_uc;
+    use super::*;
+
+    fn state() -> State {
+        let d = std::env::temp_dir();
+        State::new(&d, &d, &d)
+    }
+
+    #[test]
+    fn alloc_rounds_to_16_and_never_overlaps() {
+        let mut s = state();
+        let a = s.alloc(1);
+        let b = s.alloc(17);
+        let c = s.alloc(0);
+        assert_eq!(a, HEAP_BASE);
+        assert_eq!(b, a + 16);
+        assert_eq!(c, b + 32);
+        assert_eq!(s.heap_sizes[&c], 16);
+    }
+
+    #[test]
+    fn freed_blocks_are_quarantined_then_reused_and_coalesced() {
+        let mut s = state();
+        let (a, b, c) = (s.alloc(32), s.alloc(32), s.alloc(32));
+        s.free(a);
+        s.free(b);
+        // Quarantined: still not reusable.
+        assert_ne!(s.alloc(32), a);
+        // Releasing out of order merges neighbours into one block.
+        s.release(b, 32);
+        s.release(a, 32);
+        assert_eq!(s.heap_free.get(&a), Some(&64));
+        assert_eq!(s.alloc(64), a);
+        assert!(s.heap_free.is_empty());
+        s.free(c);
+        s.free(c); // double free is ignored
+        assert_eq!(s.heap_quarantine.len(), 3);
+    }
+
+    #[test]
+    fn quarantine_releases_the_oldest_past_64_mib() {
+        let mut s = state();
+        let big: Vec<u32> = (0..3).map(|_| s.alloc(30 << 20)).collect();
+        for &a in &big {
+            s.free(a);
+        }
+        assert_eq!(s.heap_quarantine.len(), 2);
+        assert_eq!(s.heap_free.get(&big[0]), Some(&(30 << 20)));
+        assert_eq!(s.alloc(30 << 20), big[0]);
+    }
+
+    #[test]
+    fn handles_increase_by_four() {
+        let mut s = state();
+        let (a, b) = (s.new_handle(), s.new_handle());
+        assert_eq!(b, a + 4);
+    }
+
+    #[test]
+    fn memory_helpers_round_trip() {
+        let mut uc = bare_uc();
+        wr32(&mut uc, 0x40_1000, 0xdead_beef);
+        assert_eq!(rd32(&uc, 0x40_1000), 0xdead_beef);
+        wr16(&mut uc, 0x40_1010, 0x1234);
+        assert_eq!(rd_bytes(&uc, 0x40_1010, 2), [0x34, 0x12]);
+        assert_eq!(wr_cstr(&mut uc, 0x40_1020, "Armaz\u{e9}m", 64), 7);
+        assert_eq!(rd_bytes(&uc, 0x40_1020, 8), b"Armaz\xe9m\0");
+        assert_eq!(rd_cstr(&uc, 0x40_1020), "Armaz\u{e9}m");
+        assert_eq!(rd_cstr(&uc, 0), "");
+        // Truncated to the buffer, still NUL-terminated.
+        assert_eq!(wr_cstr(&mut uc, 0x40_1040, "abcdef", 4), 3);
+        assert_eq!(rd_cstr(&uc, 0x40_1040), "abc");
+        set_reg(&mut uc, RegisterX86::EBX, 77);
+        assert_eq!(reg(&uc, RegisterX86::EBX), 77);
+    }
+
+    #[test]
+    fn zeroed_alloc_clears_dirty_memory() {
+        let mut uc = bare_uc();
+        uc.mem_map(HEAP_BASE as u64, 0x10000, Prot::ALL).unwrap();
+        wr_bytes(&mut uc, HEAP_BASE, &[0xaa; 64]);
+        let a = zeroed_alloc(&mut uc, 40);
+        assert_eq!(a, HEAP_BASE);
+        assert_eq!(rd_bytes(&uc, a, 48), vec![0; 48]);
+        assert_eq!(rd_bytes(&uc, a + 48, 1), [0xaa]);
+    }
+
+    #[test]
+    fn building_accessor_patch_applies_only_to_the_original_bytes() {
+        let mut uc = bare_uc();
+        apply_patches(&mut uc);
+        assert_eq!(rd_bytes(&uc, 0x41a4f4, 1), [0], "unknown code is left alone");
+        wr_bytes(&mut uc, 0x41a4f4, &[0x52, 0x31, 0xd2, 0x66, 0x89, 0xc2, 0x89, 0xd0]);
+        apply_patches(&mut uc);
+        assert_eq!(rd_bytes(&uc, 0x41a4f4, 3), [0x0f, 0xb7, 0xc0]);
+    }
+
+    #[test]
+    fn err_name_is_debug_text() {
+        assert_eq!(err_name(uc_error::NOMEM), format!("{:?}", uc_error::NOMEM));
+    }
 }

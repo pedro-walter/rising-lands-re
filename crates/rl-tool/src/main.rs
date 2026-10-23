@@ -14,7 +14,10 @@ usage:
 type Res<T = ()> = Result<T, Box<dyn Error>>;
 
 fn main() -> ExitCode {
-    let a: Vec<String> = env::args().skip(1).collect();
+    run(&env::args().skip(1).collect::<Vec<_>>())
+}
+
+fn run(a: &[String]) -> ExitCode {
     let r = match a.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["disc", bin, out] => cmd_disc(bin.as_ref(), out.as_ref()),
         ["dump", game, out] => cmd_dump(game.as_ref(), out.as_ref()),
@@ -129,4 +132,137 @@ fn cmd_map(game: &Path, eta_path: &Path, out: &Path, [x0, y0, w, h]: [usize; 4])
     write_png(out, (w * T) as u32, (h * T) as u32, &img)?;
     println!("{} ({}) -> {}", eta_path.display(), map.version, out.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = env::temp_dir().join(format!("rl-tool-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// CHARGE.LZS for a 2x1 image whose palette maps index i to (i, i, i); pixels are indices 1 and 2.
+    fn charge() -> Vec<u8> {
+        let mut f = b"LZSS".to_vec();
+        f.extend_from_slice(&[2, 0, 1, 0]);
+        f.extend_from_slice(b"CMAP");
+        f.extend((0..768).map(|i| (i / 3) as u8));
+        f.extend_from_slice(b"FORM");
+        f.extend_from_slice(&3u32.to_le_bytes());
+        f.extend_from_slice(&[0b11, 1, 2]);
+        f
+    }
+
+    /// A 32x32 tile (index 7 everywhere) in a one-sprite archive.
+    fn blocs() -> Vec<u8> {
+        let mut d = vec![1, 0, 32, 0, 32, 0];
+        let mut data = Vec::new();
+        for _ in 0..8 {
+            data.push(0x80);
+            data.extend([7u8; 128]);
+        }
+        d.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        d.extend(data);
+        d
+    }
+
+    fn game_dir(name: &str) -> std::path::PathBuf {
+        let d = tmp(name);
+        fs::write(d.join("CHARGE.LZS"), charge()).unwrap();
+        fs::create_dir_all(d.join("GRAPHICS")).unwrap();
+        fs::write(d.join("GRAPHICS/BLOCS.CMP"), blocs()).unwrap();
+        d
+    }
+
+    fn eta() -> Vec<u8> {
+        let mut d = vec![0u8; 0x50030 + 8];
+        d[..4].copy_from_slice(b"V0.3");
+        d[0x5001c..0x5001e].copy_from_slice(&64u16.to_le_bytes());
+        d[0x5001e..0x50020].copy_from_slice(&64u16.to_le_bytes());
+        d
+    }
+
+    fn read_png(path: &Path) -> (u32, u32, Vec<u8>) {
+        let dec = png::Decoder::new(File::open(path).unwrap());
+        let mut r = dec.read_info().unwrap();
+        let mut buf = vec![0; r.output_buffer_size()];
+        let info = r.next_frame(&mut buf).unwrap();
+        (info.width, info.height, buf[..info.buffer_size()].to_vec())
+    }
+
+    #[test]
+    fn png_writer_round_trips() {
+        let d = tmp("png");
+        write_png(&d.join("a.png"), 2, 1, &[1, 2, 3, 255, 4, 5, 6, 0]).unwrap();
+        assert_eq!(read_png(&d.join("a.png")), (2, 1, vec![1, 2, 3, 255, 4, 5, 6, 0]));
+        assert!(write_png(&d.join("nodir/a.png"), 1, 1, &[0; 4]).is_err());
+    }
+
+    #[test]
+    fn dump_converts_screens_and_sprites() {
+        let g = game_dir("dump");
+        // A PIE screen is shown with the game palette, not its own.
+        let mut pie = b"Pie".to_vec();
+        pie.extend_from_slice(&[1, 0, 1, 0, 0, 1]);
+        pie.extend(std::iter::repeat(200).take(768));
+        pie.extend_from_slice(&[0, 9]);
+        fs::write(g.join("TITLE.PIE"), pie).unwrap();
+        fs::write(g.join("readme.txt"), b"ignored").unwrap();
+        let out = g.join("out");
+        cmd_dump(&g, &out).unwrap();
+        assert_eq!(read_png(&out.join("screens/charge.png")), (2, 1, vec![1, 1, 1, 255, 2, 2, 2, 255]));
+        assert_eq!(read_png(&out.join("screens/title.png")).2, vec![9, 9, 9, 255]);
+        let (w, h, px) = read_png(&out.join("sprites/blocs/00000.png"));
+        assert_eq!((w, h, &px[..4]), (32, 32, &[7, 7, 7, 255][..]));
+        assert!(!out.join("screens/readme.png").exists());
+        // No CHARGE.LZS: a clear error.
+        assert!(cmd_dump(&tmp("empty"), &out).is_err());
+    }
+
+    #[test]
+    fn map_renders_tiles_and_clips_the_window() {
+        let g = game_dir("map");
+        fs::write(g.join("m.eta"), eta()).unwrap();
+        let out = g.join("m.png");
+        cmd_map(&g, &g.join("m.eta"), &out, [0, 0, 2, 1]).unwrap();
+        let (w, h, px) = read_png(&out);
+        assert_eq!((w, h), (64, 32));
+        assert_eq!(&px[..4], &[7, 7, 7, 255]);
+        // A window past the edge is clipped to the 256x256 grid.
+        cmd_map(&g, &g.join("m.eta"), &out, [255, 255, 10, 10]).unwrap();
+        assert_eq!(read_png(&out).0, 32);
+        assert!(cmd_map(&g, &g.join("missing.eta"), &out, [0, 0, 1, 1]).is_err());
+    }
+
+    #[test]
+    fn command_line_dispatch() {
+        let g = game_dir("cli");
+        fs::write(g.join("m.eta"), eta()).unwrap();
+        let out = g.join("cli.png");
+        let (g_s, e_s, o_s) = (g.to_str().unwrap(), g.join("m.eta"), out.to_str().unwrap().to_string());
+        assert_eq!(run(&args(&[])), ExitCode::from(2));
+        assert_eq!(run(&args(&["nope"])), ExitCode::from(2));
+        assert_eq!(run(&args(&["map", g_s, e_s.to_str().unwrap(), &o_s])), ExitCode::SUCCESS);
+        assert_eq!(run(&args(&["map", g_s, e_s.to_str().unwrap(), &o_s, "0", "0", "1", "1"])), ExitCode::SUCCESS);
+        assert_eq!(read_png(&out).0, 32);
+        assert_eq!(run(&args(&["dump", g_s, g.join("o").to_str().unwrap()])), ExitCode::SUCCESS);
+        assert_eq!(run(&args(&["dump", "/nonexistent", "/tmp/x"])), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn disc_command_extracts_files_and_audio_next_to_the_cue() {
+        // An image with no ISO header fails cleanly.
+        let d = tmp("disccmd");
+        fs::write(d.join("x.bin"), vec![0u8; 20 * 2352]).unwrap();
+        assert!(cmd_disc(&d.join("x.bin"), &d.join("out")).is_err());
+        assert_eq!(run(&args(&["disc", d.join("x.bin").to_str().unwrap(), d.join("out").to_str().unwrap()])), ExitCode::FAILURE);
+    }
 }

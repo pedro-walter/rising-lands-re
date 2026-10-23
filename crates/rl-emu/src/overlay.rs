@@ -110,3 +110,71 @@ pub fn draw_arrow(rgba: &mut [u8], w: usize, h: usize, x: i32, y: i32) {
         rgba[o..o + 4].copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+
+    fn px(buf: &[u8], stride: usize, x: usize, y: usize) -> [u8; 4] {
+        let o = (y * stride + x) * 4;
+        buf[o..o + 4].try_into().unwrap()
+    }
+
+    #[test]
+    fn every_glyph_is_unique_and_unknown_characters_are_blank() {
+        for (i, (c, rows)) in GLYPHS.iter().enumerate() {
+            assert!(rows.iter().all(|r| r >> 5 == 0), "{c:?} uses more than 5 columns");
+            for (d, other) in &GLYPHS[i + 1..] {
+                assert_ne!(c, d);
+                assert_ne!(rows, other, "{c:?} and {d:?} look the same");
+            }
+        }
+        assert_eq!(glyph('a'), glyph('A'));
+        assert_eq!(glyph('~'), &[0; 7]);
+    }
+
+    #[test]
+    fn text_width_counts_six_pixels_per_character() {
+        assert_eq!(text_width("", 3), 0);
+        assert_eq!(text_width("ABC", 1), 18);
+        assert_eq!(text_width("ab", 2), 24);
+    }
+
+    #[test]
+    fn fill_rect_clips_at_the_buffer_end() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        fill_rect(&mut buf, 4, 2, 2, 10, 10, RED);
+        assert_eq!(px(&buf, 4, 3, 3), RED);
+        assert_eq!(px(&buf, 4, 1, 1), [0; 4]);
+        assert_eq!(buf.len(), 64);
+    }
+
+    #[test]
+    fn draw_text_lights_the_expected_pixels() {
+        let mut buf = vec![0u8; 10 * 8 * 4];
+        draw_text(&mut buf, 10, 1, 0, "I", 1, RED);
+        // 'I' has a full top bar (row 0 = 0b01110) and a centre stem (row 3 = 0b00100).
+        assert_eq!(px(&buf, 10, 2, 0), RED);
+        assert_eq!(px(&buf, 10, 4, 0), RED);
+        assert_eq!(px(&buf, 10, 1, 0), [0; 4]);
+        assert_eq!(px(&buf, 10, 3, 3), RED);
+        let mut big = vec![0u8; 20 * 20 * 4];
+        draw_text(&mut big, 20, 0, 0, "I", 2, RED);
+        assert_eq!(px(&big, 20, 3, 1), RED, "scale 2 doubles each dot");
+    }
+
+    #[test]
+    fn arrow_is_clipped_to_the_frame() {
+        let mut buf = vec![0u8; 20 * 20 * 4];
+        draw_arrow(&mut buf, 20, 20, 2, 3);
+        assert_eq!(px(&buf, 20, 2, 3), [0x10, 0x10, 0x10, 255], "tip pixel");
+        assert_eq!(px(&buf, 20, 3, 4), [0xfc, 0xfc, 0xfc, 255]);
+        assert_eq!(px(&buf, 20, 15, 3), [0; 4], "transparent corner untouched");
+        // Entirely or partly off-screen positions must not panic.
+        draw_arrow(&mut buf, 20, 20, -7, -7);
+        draw_arrow(&mut buf, 20, 20, 15, 15);
+        draw_arrow(&mut buf, 20, 20, 100, 100);
+    }
+}
