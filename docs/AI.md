@@ -64,13 +64,36 @@ below).
 
 ### Grudges (`FUN_00475118`)
 
-`attitude[victim][offender]` changes by a delta from the table at `0x497288` (16 bytes per event: delta, "applies to
-everyone" flag, counter, threshold; every threshold is 1) and is clamped to +-50. Deltas: events 0-2 -3/-3/-10,
-3 -5, 4 -10, 5 -25, 6 -10, 7 -5, **8 -50 (applies to everyone)**, 9 -25, 10 -25, 11 -15, 12 +5, 13 +10, 14/15 +1,
-16 +5, 17 +1, 18 +10. Callers: 8 = building destroyed (`FUN_0041a2c1`, `FUN_004266e1`), 3/4 = hits in the unit state
-machine, 6/10 = theft and sabotage (`FUN_00450874`), 11 = `0x466fa7` (trade negotiation, both sides AI-checked),
-16 = an alliance being formed (`0x46d9ee` in the mutual-alliance setter, and `0x480e02` in the AI script that
-forms one): +5 each way. Gifts and trades raise it (`FUN_00475267`).
+`attitude[a][b]` (record `a` at `[0x5080a8]`, `+0xc + b*2`, i16) is how much clan `a` likes clan `b`. An event is
+`FUN_00475118(a = the clan that feels it, b = the clan that caused it, event)`. The delta comes from the table at
+`0x497288` (16 bytes per event: delta, "applies to everyone" flag, counter, threshold; every threshold is 1), the result
+is clamped to +-50, and nothing happens unless `a != b`, both are clans 0-3 (the black clan never counts) and neither
+is eliminated. Checked at runtime with the `grudge` console command (`grudge 1 0 1` gave -3, event 19 gave +1, event 8
+set every pair of the four clans to -50).
+
+Every call site, by event:
+
+| event | delta | fired by |
+|---|---|---|
+| 0 | -3 | a hit on a unit of another clan (`FUN_004502f0`), for unit types other than 3 and 0xb-0x11. `a` is the owner of the hit unit, `b` the attacker |
+| 1 | -3 | the same hit on a unit of type 3 or 0xb-0x11 (the machines) |
+| 3 | -5 | a thief steals **resources** from a building of `a` (`FUN_0045442c`; the manual's "Ladrao") |
+| 4 | -10 | a thief steals a **technology** (item kind 3 in the same code) |
+| 6 + 10 | -10 and -25 | attacking one of your **allies**: both events fire for the ally toward the attacker (-35 together), and the alliance is cleared in both directions. Three places in `FUN_00450874`, all of the form `if allied(a, b) { event 10; event 6; break the alliance }` |
+| **8** | **-50, to everyone** | a clan destroys a building of another clan (`FUN_0041a2c1`, when the damage passes the building's health). The flag makes it hit **all twelve ordered pairs**, so one razed building sets every clan against every other, to a floor of -50 |
+| 9 | -25 | an alliance offer an AI made **to you** that you let lapse (the 800-tick pending timer, `FUN_0046da3b`): that AI likes you 25 less |
+| 11 | -15 | a trade that was started and then ran out of time (`FUN_00466e9b`, satisfaction counter above 32): each AI party dislikes the other by 15 |
+| 16 | +5 | an alliance being formed, both directions (`FUN_0046d927`, and `FUN_00480d97` in the AI script) |
+| 19 | +1 | **peace drift**: every 2000 ticks (67 s) each clan gains +1 towards each other clan it had no hostile act with since the last check (`FUN_0046d629`; hostile acts bump a counter through `FUN_0046d600`) |
+| 2, 5, 7, 12-15, 17, 18, 20, 21 | -10, -25, -5, +5, +10, +1, +1, +1, +10, +5, +1 | **never fired**: no code reaches them (table entries only) |
+
+Gifts and trade surplus go through `FUN_00475267` instead, which adds a computed amount (`[0x4e2948] / 5`, a trade's
+value) to the same cell with the same +-50 clamp (`0x460301`, `0x4665f6`, `0x4666c2`). The `FUN_004266e1` call of
+event 8 has `a == b`, so the gate drops it.
+
+What this means in play: attitude starts at 0, drifts up by about 27 per 30 minutes of peace, and falls by 3 for every
+hit on any of a clan's units, 5-10 for thefts, 35 for hitting an ally, and **to the floor for everybody as soon as
+one clan destroys another clan's building**. After that only the drift (+1 per minute) and gifts bring it back.
 
 Mission 5 (headless, 4 minutes, `ents` dumps every 25 s): red, yellow and green only farmed and built; their
 soldiers stayed idle. Nothing attacked.
@@ -138,18 +161,49 @@ sanctuary, storage and homes are not in any list: the AI raids support buildings
 
 ## Alliances and victory
 
-* `allied(a, b)` (`FUN_0046d838`) reads a bit in **a's own** mask (`record + 6`), so it is one-sided. The human toggles
-  it with command 0x1d (`FUN_004637e0`); command 0x26 (`FUN_0046d927`) sets both directions and fires grudge event 16
-  (+5 each). Attacking an ally clears both directions (`FUN_0046d8cb` in `FUN_00450874`).
+* `allied(a, b)` (`FUN_0046d838`) reads a bit in **a's own** mask (`record + 6`), so it is one-sided. Every clan has its
+  own bit set in its own mask. Command 0x1d (`FUN_004637e0`) toggles the human's own bit for another clan with no
+  question asked; command 0x26 (`FUN_0046d927`) sets both directions and fires grudge event 16 (+5 each). Attacking an
+  ally clears both directions (`FUN_0046d8cb`).
 * An objective of type 5 ("eliminate every enemy clan", `FUN_00458606`) is satisfied when every clan that is **not
-  allied with you** has no units and no buildings. So allying with everybody satisfies it at once; nothing in the code
-  limits the number of allies. The manual says the same ("an enemy clan is one you have no alliance with"). Other
-  objective types (unit counts, resources, buildings) do not look at alliances.
+  allied with you** (your own mask) has no units and no buildings. The manual says the same ("an enemy clan is one you
+  have no alliance with"). Other objective types do not look at alliances.
 * The AI is not bound by alliances: the target score gets +25 for an ally, so it can still attack one that it likes
-  much less than the others. Its diplomacy script (command 0x27) needs a Market, then: with no ally it goes for the
-  clan it likes best (highest attitude) and proposes (messenger to that clan's sanctuary); with allies it looks at the
-  clan it likes least and, if that is an ally, **breaks the alliance** (`FUN_00480d97`). Trade offers are valued at
-  `(attitude + 80 + 40 if allied)` percent of what is asked, so goodwill 0 = 80%, allied +50 = 170%.
+  much less than the others. Trade offers are valued at `(attitude + 80 + 40 if allied)` percent of what is asked.
+
+### How a proposal is answered
+
+**You propose** (a messenger enters an AI sanctuary): `FUN_00449716` calls `FUN_0046dadb(proposer, owner of the
+sanctuary)`. If they are already allied it breaks the alliance in both directions. Otherwise, for an AI recipient,
+`FUN_0047fc1b` starts the AI script **command 0x28** (record `0x39c`) on the recipient with the proposer in variable 1.
+The script (decoded from the record chain `0x39c`..`0x3af`; "att" is how much the AI likes you, "its allies" are the
+clans in the AI's own mask other than itself):
+
+1. **Mission 4 (the diplomacy tutorial)**: accept, always. (The mission number is `[0x496fe4]`, 1-based during play.)
+2. If you already have **two or more** allies (clans in your own mask): refuse.
+3. If the AI has **two or more** allies: if you are the clan it likes least, nothing happens at all (no answer);
+   otherwise it first **breaks its alliance with its least-liked clan** (if that one is an ally), then goes to step 5.
+4. If the AI has **one** ally: go to step 5.
+5. With one or two allies on its side the AI accepts only if **att > 30**. With no ally it accepts if **att > -15**.
+6. Accept = both directions set, grudge event 16 both ways (+5 each). Refuse = it clears any alliance with you and, if
+   you are the local human, shows the message `0x195 + clan` (no goodwill penalty).
+
+Checked at runtime in mission 6 with the `diplo` and `aiexec` console commands, seven cases, all as written: no allies
+at att -10 (accepted) and -20 (refused); one ally at att 30 (refused) and 31 (accepted); proposer with two allies at
+att +50 (refused); proposer with one ally at att -10 (accepted); AI with two allies, att 40 and the least-liked
+being one of them (it dropped that ally and accepted); AI with two allies and the proposer least liked (nothing). In
+mission 4, at att -50, red accepted at once.
+
+So the first clan you ask when nobody has allies yet says yes unless it hates you, which is how red usually ends up on
+your side; a clan that already has a friend wants you at +31 or more. **Three allies cannot be made by messenger**: the
+third request is refused while you hold two. (The one-sided toggle, command 0x1d, has no such check; whether the game's
+interface exposes it was not checked.)
+
+**The AI proposes to you**: its diplomacy script (command 0x27, record `0x371`, every `FreqAlliance`) needs a Market.
+With no ally it picks the clan it likes best (highest att) and sends a messenger; with allies it looks at the clan it likes
+least and, if that is an ally, **breaks the alliance**. When its messenger enters your sanctuary `FUN_0046dadb` starts an
+**800-tick (27 s) pending offer** and the flag blinks; clicking it (command 0x26) accepts. If the timer runs out the
+AI's goodwill towards you drops by 25 (event 9).
 
 ## Carry-over between missions
 
@@ -160,14 +214,31 @@ carried from one mission to the next"). The saved game stores them too (`FUN_004
 
 They have a visible effect: **the map file is chosen from the grudges.** `FUN_0046c1b8` builds the name
 `World\MondeNN` + suffix. For missions 10, 12 and 17 the suffix is `a`, `b` or `c` for red, yellow or green: the clan with the
-lowest attitude towards you (ties go to red). Mission 9 uses `a` to `d` from a count (0-3) saved when mission 8 ends.
+lowest attitude towards you (ties go to red). Mission 9 uses `a` to `d` from a count (0-3) taken when mission 8 is won: how many of the three rival clans already have a
+building of the objective's type (the sanctuary) inside the objective's zone (`FUN_00458606`, the block that only runs in
+missions 8 and 13, stored in `[0x4e1d85]`). Mission 8 is the race to cross the ocean and build a sanctuary, so `a` = you
+were first, `d` = all three rivals got there before you.
 The variants are different maps (100,000-250,000 bytes differ in 1.3 MB). So the clan that likes you least in the
 campaign is the one you face in 10, 12 and 17: be generous to one clan, or hostile to another, to steer it.
 
+## Mission 22
+
+`MONDE22.ETA` has 11 spawn points, one ambush point and 251 roam markers. Ten of the spawn points fire every 6 to 25
+minutes (the same range as missions 20-24), but the eleventh, at the west edge (0, 204), fires **every 60 seconds** with
+every group 0-14 in its cycle, so it adds about as many squads as the other ten together (the ten sum to about one squad a
+minute). Every other interval in all 24 maps is a multiple of 60 s starting at 300 s, and this is the only 60 s one, so it
+looks like a test value that shipped; nothing in the data says whether it is deliberate. The ambush point (212, 200) sits in the
+south-east, where the mission asks for a sanctuary. The squads walk to random roam markers (91%), so the extra stream
+is felt across the map rather than at one place.
+
 ## Open questions
 
-* How a human alliance proposal is accepted or refused (the messenger at the sanctuary: `FUN_00466dd1` is the trade
-  state machine; the alliance decision itself is not decoded).
-* What the mission 9 count is exactly, and what the A/B/C variants change besides the layout.
-* Why mission 22 has a spawn point every 60 s at (0, 204).
+* Whether the mission-22 60 s spawn point is deliberate.
+* What the A/B/C variants of missions 9, 10, 12 and 17 change besides the layout.
+* Whether command 0x1d (one-sided ally toggle) is reachable from the interface.
+* When red, yellow and green start running their scripts. `FUN_0047f927` runs for players 1-4 every tick, but in the first
+  3,862 ticks of a mission (about two minutes) the command executor `FUN_0047d314` was reached only for player 4: the
+  build, economy and planner modules of the clans return an action first. Scripts did start running later (after
+  about 9,000 ticks with 3000 of each resource and instant build for the AIs), but I did not attribute them per clan.
+  A proposal made that early waits in the clan's task list until the executor gets to it; `aiexec` forces it for tests.
 * Whether the clan AI ever re-enables `Ia.INI`-style tuning: a hook on `0x47fc54` could read it for real.

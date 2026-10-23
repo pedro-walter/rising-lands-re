@@ -6,6 +6,8 @@ use unicorn_engine::RegisterX86 as R;
 
 /// Per-player resource table: 8-byte entries indexed `player * 4 + kind`, current amount at +2 (u16).
 const RES_TABLE: u32 = 0x4e2ea8;
+/// Pointer to the player records.
+const PLAYERS: u32 = 0x5080a8;
 const RES_NAMES: [&str; 4] = ["metal", "comida", "pedra", "extra"];
 
 fn res_addr(kind: u32, player: u32) -> u32 {
@@ -26,7 +28,7 @@ fn set_u16(uc: &mut Uc, addr: u32, v: u16) {
     wr_bytes(uc, addr, &v.to_le_bytes());
 }
 
-pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | snap | diff | help";
+pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | snap | diff | help";
 
 /// Memory snapshot taken by `snap`, for `diff` (region start, bytes).
 static SNAP: std::sync::Mutex<Vec<(u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
@@ -74,6 +76,7 @@ pub fn call_guest(uc: &mut Uc, target: u32, regs: [u32; 4], stack: &[u32]) -> Re
     set_reg(uc, R::ESP, esp);
     let res = uc.emu_start(target as u64, CALL_TRAP as u64, 0, 0);
     let eax = reg(uc, R::EAX);
+    let eip = reg(uc, R::EIP);
     let stopped_early = uc.get_data_mut().pending.take().is_some();
     let _ = uc.context_restore(&ctx);
     let d = uc.get_data_mut();
@@ -81,7 +84,7 @@ pub fn call_guest(uc: &mut Uc, target: u32, regs: [u32; 4], stack: &[u32]) -> Re
     match res {
         Ok(()) if !stopped_early => Ok(eax),
         Ok(()) => Err("a funcao do jogo pediu para ceder o controle".into()),
-        Err(e) => Err(format!("falha no jogo: {e:?}")),
+        Err(e) => Err(format!("falha no jogo em {eip:#x}: {e:?}")),
     }
 }
 
@@ -209,6 +212,71 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
                 }
             }
             format!("{n} REGISTROS EM {a:#x}")
+        }
+        // Player records (0x14 bytes at [0x5080a8]): controller (+1), ally mask (+6), attitude toward each clan (+0xc, i16).
+        ["clas"] => {
+            let base = rd32(uc, PLAYERS);
+            for p in 0..4u32 {
+                let r = rd_bytes(uc, base + p * 0x14, 0x14);
+                let att: Vec<i16> = (0..4).map(|o| i16::from_le_bytes([r[0xc + o * 2], r[0xd + o * 2]])).collect();
+                eprintln!("[clan] {p} ctrl={} aliados={:04b} atitude={att:?}", r[1], r[6] & 15);
+            }
+            "OK".into()
+        }
+        ["att", a, b, rest @ ..] => {
+            let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return "USO: att <a> <b> [valor]".into() };
+            if a > 3 || b > 3 {
+                return "CLA 0-3".into();
+            }
+            let addr = rd32(uc, PLAYERS) + a * 0x14 + 0xc + b * 2;
+            if let Some(v) = rest.first().and_then(|v| v.parse::<i16>().ok()) {
+                wr_bytes(uc, addr, &v.to_le_bytes());
+            }
+            let v = rd_bytes(uc, addr, 2);
+            format!("atitude[{a}][{b}] = {}", i16::from_le_bytes([v[0], v[1]]))
+        }
+        ["ally", a, b, rest @ ..] => {
+            let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return "USO: ally <a> <b> [0|1]".into() };
+            if a > 3 || b > 3 {
+                return "CLA 0-3".into();
+            }
+            let addr = rd32(uc, PLAYERS) + a * 0x14 + 6;
+            let mut m = rd_bytes(uc, addr, 1)[0];
+            match rest.first() {
+                Some(&"1") => m |= 1 << b,
+                Some(&"0") => m &= !(1 << b),
+                _ => {}
+            }
+            wr_bytes(uc, addr, &[m]);
+            format!("{a} aliado de {b}: {}", m >> b & 1)
+        }
+        // `grudge <vitima> <ofensor> <evento 0-21>`: fires one of the game's goodwill events (table at 0x497288).
+        ["grudge", a, b, e] => {
+            let (Ok(a), Ok(b), Ok(e)) = (a.parse::<u32>(), b.parse::<u32>(), e.parse::<u32>()) else { return "USO: grudge <vitima> <ofensor> <evento>".into() };
+            match call_guest(uc, 0x475118, [a, b, e, 0], &[]) {
+                Ok(_) => "EVENTO APLICADO".into(),
+                Err(e) => e,
+            }
+        }
+        // `aiexec <clan> [n]`: runs the AI's command executor on that clan's task list n times (the game only reaches it
+        // for clans 1-3 when its build and economy modules are idle, which takes minutes).
+        ["aiexec", p, rest @ ..] => {
+            let Ok(p) = p.parse::<u32>() else { return "USO: aiexec <jogador> [n]".into() };
+            let n: u32 = rest.first().and_then(|n| n.parse().ok()).unwrap_or(1);
+            for _ in 0..n {
+                if let Err(e) = call_guest(uc, 0x47d314, [0x5148b0 + p.min(4) * 16, 0, 0, 0], &[]) {
+                    return e;
+                }
+            }
+            format!("EXECUTOR RODOU {n}x")
+        }
+        // `diplo <proponente> <ia>`: what happens when a messenger of `proponente` enters the sanctuary of the AI clan `ia`.
+        ["diplo", a, b] => {
+            let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return "USO: diplo <proponente> <ia>".into() };
+            match call_guest(uc, 0x47fc1b, [a, b, 0, 0], &[0, 0, 0, 0]) {
+                Ok(_) => "PROPOSTA ENVIADA".into(),
+                Err(e) => e,
+            }
         }
         ["instant", rest @ ..] => {
             let on = !matches!(rest.first(), Some(&"off"));
