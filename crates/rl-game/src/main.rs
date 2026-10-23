@@ -231,3 +231,175 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn palette() -> rl_assets::Palette {
+        let mut p = [[0u8; 3]; 256];
+        for (i, e) in p.iter_mut().enumerate() {
+            *e = [i as u8, 0, 255 - i as u8];
+        }
+        rl_assets::Palette(p)
+    }
+
+    /// `.CMP` bytes for a sprite of `w x h` that is fully opaque with palette index `v`.
+    fn solid_cmp(w: u16, h: u16, v: u8) -> Vec<u8> {
+        let mut tokens = Vec::new();
+        let mut left = w as usize * h as usize;
+        while left > 0 {
+            let n = left.min(128);
+            tokens.push((256 - n) as u8);
+            tokens.extend(std::iter::repeat(v).take(n));
+            left -= n;
+        }
+        let mut d = 1u16.to_le_bytes().to_vec();
+        d.extend_from_slice(&w.to_le_bytes());
+        d.extend_from_slice(&h.to_le_bytes());
+        d.extend_from_slice(&(tokens.len() as u32).to_le_bytes());
+        d.extend(tokens);
+        d
+    }
+
+    fn sheet(w: u16, h: u16, v: u8) -> Sheet {
+        let archive = SpriteArchive::parse(&solid_cmp(w, h, v)).unwrap();
+        Sheet { cache: (0..archive.sprites.len()).map(|_| None).collect(), archive, palette: palette() }
+    }
+
+    fn px(fb: &[u8], x: usize, y: usize) -> [u8; 4] {
+        fb[(y * SCREEN_W + x) * 4..][..4].try_into().unwrap()
+    }
+
+    fn map(buildings: Vec<eta::Building>, units: Vec<eta::Unit>) -> eta::Map {
+        eta::Map {
+            version: "V0.3".into(),
+            width: 64,
+            height: 64,
+            layer0: vec![0; 65536],
+            tiles: vec![0; 65536],
+            layer2: vec![0; 65536],
+            layer3: vec![0; 65536],
+            resources: [[0; 4]; 3],
+            starts: [(0, 0); 4],
+            buildings,
+            units,
+        }
+    }
+
+    fn building(kind: u16, clan: u8, x: u8, y: u8) -> eta::Building {
+        eta::Building { slot: 0, clan, kind, x, y, raw: Vec::new() }
+    }
+
+    #[test]
+    fn sheets_decode_lazily_and_reject_bad_indices() {
+        let mut s = sheet(2, 2, 7);
+        assert!(s.cache[0].is_none());
+        let img = s.get(0).unwrap();
+        assert_eq!((img.w, img.h), (2, 2));
+        assert_eq!(&img.rgba[..4], &[7, 0, 248, 255]);
+        assert!(s.cache[0].is_some());
+        assert!(s.get(1).is_none());
+    }
+
+    #[test]
+    fn sheet_loading_reads_from_the_graphics_folder() {
+        let dir = std::env::temp_dir().join(format!("rl-game-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("GRAPHICS")).unwrap();
+        std::fs::write(dir.join("GRAPHICS/T.CMP"), solid_cmp(1, 1, 3)).unwrap();
+        assert_eq!(Sheet::load(&dir, "T.CMP", &palette()).unwrap().archive.sprites.len(), 1);
+        assert!(Sheet::load(&dir, "MISSING.CMP", &palette()).is_err());
+        std::fs::write(dir.join("GRAPHICS/BAD.CMP"), b"x").unwrap();
+        assert!(Sheet::load(&dir, "BAD.CMP", &palette()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn blit_clips_at_every_screen_edge_and_skips_transparent_pixels() {
+        let mut fb = vec![0u8; SCREEN_W * SCREEN_H * 4];
+        let img = Img { w: 2, h: 2, rgba: vec![9, 9, 9, 255, 0, 0, 0, 0, 8, 8, 8, 255, 7, 7, 7, 255] };
+        blit(&mut fb, &img, 10, 20);
+        assert_eq!((px(&fb, 10, 20), px(&fb, 11, 20), px(&fb, 10, 21), px(&fb, 11, 21)), ([9, 9, 9, 255], [0; 4], [8, 8, 8, 255], [7, 7, 7, 255]));
+        blit(&mut fb, &img, -1, -1);
+        assert_eq!(px(&fb, 0, 0), [7, 7, 7, 255], "only the bottom-right pixel is on screen");
+        blit(&mut fb, &img, SCREEN_W as i32 - 1, SCREEN_H as i32 - 1);
+        assert_eq!(px(&fb, SCREEN_W - 1, SCREEN_H - 1), [9, 9, 9, 255]);
+        blit(&mut fb, &img, 5000, 5000);
+        blit(&mut fb, &img, -5000, -5000);
+    }
+
+    #[test]
+    fn put_ignores_out_of_range_pixels() {
+        let mut fb = vec![0u8; SCREEN_W * SCREEN_H * 4];
+        put(&mut fb, -1, 0, [1; 4]);
+        put(&mut fb, 0, SCREEN_H as i32, [1; 4]);
+        put(&mut fb, SCREEN_W as i32, 0, [1; 4]);
+        assert!(fb.iter().all(|&b| b == 0));
+        put(&mut fb, 3, 4, [1, 2, 3, 4]);
+        assert_eq!(px(&fb, 3, 4), [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn markers_show_the_clan_colour_and_the_kind_number() {
+        let mut fb = vec![0u8; SCREEN_W * SCREEN_H * 4];
+        draw_marker(&mut fb, 100, 100, 1, 12);
+        assert_eq!(px(&fb, 100, 100), CLAN_COLORS[1], "border in the clan colour");
+        assert_eq!(px(&fb, 131, 131), CLAN_COLORS[1]);
+        assert_eq!(px(&fb, 120, 100 + 29), [85, 23, 23, 255], "dimmed fill (only white glyph pixels differ)");
+        let white = (100..132).flat_map(|y| (100..132).map(move |x| (x, y))).filter(|&(x, y)| px(&fb, x, y) == [255, 255, 255, 255]).count();
+        assert!(white > 20, "two digits drawn: {white}");
+        // Clan numbers wrap to the four colours; kinds up to 255 draw three digits without panicking.
+        draw_marker(&mut fb, 0, 0, 5, 255);
+        assert_eq!(px(&fb, 0, 0), CLAN_COLORS[1]);
+        draw_marker(&mut fb, -20, -20, 0, 7);
+        draw_marker(&mut fb, SCREEN_W as i32 - 5, SCREEN_H as i32 - 5, 3, 0);
+    }
+
+    #[test]
+    fn building_sprites_and_footprints() {
+        assert_eq!((building_sprite(0), building_sprite(1), building_sprite(2), building_sprite(3)), (Some(47), Some(1), Some(3), None));
+        assert_eq!(FOOTPRINT.len(), 21);
+    }
+
+    #[test]
+    fn render_draws_terrain_buildings_and_unit_markers() {
+        let mut tiles = sheet(32, 32, 5);
+        let mut bldg = sheet(40, 40, 9);
+        // Kind 1 uses sprite 1 which this one-sprite sheet lacks, so it falls back to the outlined placeholder box.
+        let m = map(vec![building(1, 2, 4, 3), building(99, 0, 20, 20)], vec![eta::Unit { id: 0, clan: 3, kind: 6, x: 1, y: 1, raw: Vec::new() }]);
+        let mut fb = vec![0xaau8; SCREEN_W * SCREEN_H * 4];
+        render(&mut fb, &m, &mut tiles, &mut bldg, 0, 0);
+        assert_eq!(px(&fb, 790, 590), [5, 0, 250, 255], "terrain fills the view");
+        assert_eq!(px(&fb, 4 * TILE, 3 * TILE), CLAN_COLORS[2], "placeholder building outline");
+        assert_eq!(px(&fb, TILE, TILE), CLAN_COLORS[3], "unit marker border");
+        // Scrolled: the unit at cell (1,1) with the camera at (16, 16) moves up-left by 16 pixels.
+        render(&mut fb, &m, &mut tiles, &mut bldg, 16, 16);
+        assert_eq!(px(&fb, TILE - 16, TILE - 16), CLAN_COLORS[3]);
+        // Past the playable area nothing but black is drawn.
+        let mut small = map(vec![], vec![]);
+        small.width = 2;
+        small.height = 2;
+        render(&mut fb, &small, &mut tiles, &mut bldg, 0, 0);
+        assert_eq!(px(&fb, 100, 100), [0, 0, 0, 0]);
+        assert_eq!(px(&fb, 10, 10), [5, 0, 250, 255]);
+    }
+
+    #[test]
+    fn sprite_buildings_sit_on_the_bottom_of_their_footprint() {
+        let mut tiles = sheet(32, 32, 5);
+        // Index 1 is Caserne (sprite 1); build a two-sprite sheet so it exists.
+        let mut two = solid_cmp(8, 8, 9);
+        let extra = solid_cmp(8, 8, 9);
+        two[0] = 2;
+        two.extend_from_slice(&extra[2..]);
+        let archive = SpriteArchive::parse(&two).unwrap();
+        let mut bldg = Sheet { cache: vec![None, None], archive, palette: palette() };
+        let m = map(vec![building(1, 0, 10, 10)], vec![]);
+        let mut fb = vec![0u8; SCREEN_W * SCREEN_H * 4];
+        render(&mut fb, &m, &mut tiles, &mut bldg, 0, 0);
+        // Caserne footprint is 5x6 cells: the 8 px sprite ends at the footprint's bottom edge, left-aligned.
+        let (x, y) = (10 * TILE, (10 + 6) * TILE - 8);
+        assert_eq!(px(&fb, x, y), [9, 0, 246, 255]);
+        assert_eq!(px(&fb, x + 8, y), [5, 0, 250, 255]);
+    }
+}

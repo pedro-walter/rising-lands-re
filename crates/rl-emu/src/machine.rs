@@ -545,13 +545,52 @@ pub fn err_name(e: uc_error) -> String {
 pub mod testing {
     use super::*;
 
+    /// A machine running a tiny generated executable (see [`crate::pe::testing::exe`]).
+    pub fn machine(code: &[u8], imports: &[&str]) -> Machine {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!("rl-machine-{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("TEST.EXE");
+        std::fs::write(&exe, crate::pe::testing::exe(code, imports)).unwrap();
+        Machine::new(&exe, &dir, &dir, &dir).unwrap()
+    }
+
+    /// Runs until the guest exits, with a bound on the number of time slices.
+    pub fn run_to_exit(m: &mut Machine) -> Result<u32, String> {
+        for _ in 0..1000 {
+            match m.step(200_000) {
+                Ok(Some(code)) => return Ok(code),
+                Ok(None) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Err("did not exit".into())
+    }
+
     /// A bare guest: 2 MiB at the PE base (code/data), a stack, and a user dir that does not exist.
     pub fn bare_uc() -> Uc<'static> {
         let dir = std::env::temp_dir().join("rl-emu-bare");
-        let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, State::new(&dir, &dir, &dir)).unwrap();
+        uc_in(&dir, &dir, &dir)
+    }
+
+    /// Like `bare_uc`, with the guest's `C:` (install), `D:` (disc) and per-user overlay on real directories.
+    pub fn uc_in(install: &Path, disc: &Path, user: &Path) -> Uc<'static> {
+        let mut uc = Unicorn::new_with_data(Arch::X86, Mode::MODE_32, State::new(install, disc, user)).unwrap();
         uc.mem_map(0x40_0000, 0x20_0000, Prot::ALL).unwrap();
         uc.mem_map((STACK_TOP - STACK_SIZE) as u64, STACK_SIZE as u64, Prot::ALL).unwrap();
         set_reg(&mut uc, RegisterX86::ESP, STACK_TOP - 0x1000);
+        uc
+    }
+
+    /// `bare_uc` plus a guest heap and room for COM method stubs.
+    pub fn com_uc() -> Uc<'static> {
+        with_heap(bare_uc())
+    }
+
+    pub fn with_heap(mut uc: Uc<'static>) -> Uc<'static> {
+        uc.mem_map(HEAP_BASE as u64, 0x80_0000, Prot::ALL).unwrap();
+        uc.mem_map(STUB_BASE as u64, 0x1_0000, Prot::ALL).unwrap();
+        uc.get_data_mut().com.next_stub = STUB_BASE + 0x100;
         uc
     }
 }
@@ -658,5 +697,88 @@ mod tests {
     #[test]
     fn err_name_is_debug_text() {
         assert_eq!(err_name(uc_error::NOMEM), format!("{:?}", uc_error::NOMEM));
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::testing::{machine, run_to_exit};
+    use super::*;
+    use crate::pe::testing::slot;
+
+    fn call_slot(i: usize) -> Vec<u8> {
+        let mut c = vec![0xff, 0x15];
+        c.extend_from_slice(&slot(i).to_le_bytes());
+        c
+    }
+
+    fn push(v: u32) -> Vec<u8> {
+        let mut c = vec![0x68];
+        c.extend_from_slice(&v.to_le_bytes());
+        c
+    }
+
+    fn store_eax(addr: u32) -> Vec<u8> {
+        let mut c = vec![0xa3];
+        c.extend_from_slice(&addr.to_le_bytes());
+        c
+    }
+
+    #[test]
+    fn exit_code_comes_from_exit_process() {
+        let code = [push(7), call_slot(0)].concat();
+        let mut m = machine(&code, &["ExitProcess"]);
+        assert_eq!(run_to_exit(&mut m), Ok(7));
+    }
+
+    #[test]
+    fn imports_get_stubs_and_return_values_reach_eax() {
+        // GetVersion -> [0x403000]; GetCurrentProcessId -> [0x403004]; ExitProcess(0).
+        let code = [call_slot(0), store_eax(0x40_3000), call_slot(1), store_eax(0x40_3004), push(0), call_slot(2)].concat();
+        let mut m = machine(&code, &["GetVersion", "GetCurrentProcessId", "ExitProcess"]);
+        assert_eq!(run_to_exit(&mut m), Ok(0));
+        assert_eq!(rd32(&m.uc, 0x40_3000), 0xc000_0a04);
+        assert_eq!(rd32(&m.uc, 0x40_3004), 100);
+        assert_eq!(m.uc.get_data().stubs.len(), 3);
+        assert_eq!(m.uc.get_data().api_counts["GetVersion"], 1);
+        assert_eq!(rd32(&m.uc, slot(0)), STUB_BASE + 16);
+    }
+
+    #[test]
+    fn host_can_call_back_into_the_guest_and_resume() {
+        // DirectPlayEnumerate(cb, ctx): the host calls cb(guid, name, 6, 0, ctx) in the guest and then returns.
+        // cb stores ctx at [0x403004] and returns (stdcall, 5 args).
+        let cb = [vec![0x8b, 0x44, 0x24, 0x14], store_eax(0x40_3004), vec![0x31, 0xc0, 0xc2, 0x14, 0x00]].concat();
+        let main = [push(0x55), push(0x40_1100), call_slot(0), store_eax(0x40_3008), push(0), call_slot(1)].concat();
+        let mut code = main;
+        code.resize(0x100, 0x90);
+        code.extend(cb);
+        let mut m = machine(&code, &["#2", "ExitProcess"]);
+        assert_eq!(run_to_exit(&mut m), Ok(0));
+        assert_eq!(rd32(&m.uc, 0x40_3004), 0x55, "the callback ran with its context argument");
+        assert_eq!(rd32(&m.uc, 0x40_3008), 0, "DP_OK is returned to the caller afterwards");
+        assert!(m.uc.get_data().frames.is_empty());
+    }
+
+    #[test]
+    fn busy_guest_is_time_sliced_and_faults_are_reported() {
+        let mut m = machine(&[0xeb, 0xfe], &[]); // jmp $
+        for _ in 0..3 {
+            assert_eq!(m.step(2_000).unwrap(), None);
+        }
+        let mut m = machine(&[0xa1, 0x78, 0x56, 0x34, 0x12], &[]); // mov eax, [0x12345678]
+        let e = run_to_exit(&mut m).unwrap_err();
+        assert!(e.starts_with("guest fault"), "{e}");
+        assert!(e.contains("READ_UNMAPPED") && e.contains("eip=0x4010"), "{e}");
+    }
+
+    #[test]
+    fn missing_or_invalid_executables_are_errors() {
+        let dir = std::env::temp_dir();
+        assert!(Machine::new(&dir.join("no-such.exe"), &dir, &dir, &dir).is_err());
+        let bad = dir.join(format!("rl-bad-{}.exe", std::process::id()));
+        std::fs::write(&bad, b"not an exe").unwrap();
+        assert!(Machine::new(&bad, &dir, &dir, &dir).is_err());
+        let _ = std::fs::remove_file(bad);
     }
 }

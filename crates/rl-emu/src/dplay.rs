@@ -329,3 +329,149 @@ pub fn call_method(uc: &mut Uc, name: &str, a: &[u32; 14], resume: u32) -> Optio
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::testing::com_uc;
+
+    fn call(uc: &mut Uc, name: &str, a: &[u32]) -> Option<u32> {
+        let mut args = [0u32; 14];
+        args[1..1 + a.len()].copy_from_slice(a);
+        call_method(uc, name, &args, 0x7f00_0100)
+    }
+
+    fn scratch(uc: &mut Uc, n: u32) -> u32 {
+        zeroed_alloc(uc, n)
+    }
+
+    fn take_call(uc: &mut Uc) -> (u32, Vec<u32>, Vec<(u32, Vec<u32>)>, Option<u32>) {
+        match uc.get_data_mut().pending.take() {
+            Some(Action::Call { target, args, rest, set_eax, .. }) => (target, args, rest, set_eax),
+            _ => panic!("no guest callback queued"),
+        }
+    }
+
+    #[test]
+    fn create_registers_an_object_and_enumerate_offers_tcpip() {
+        let mut uc = com_uc();
+        let out = scratch(&mut uc, 4);
+        assert_eq!(create(&mut uc, out), DP_OK);
+        assert!(matches!(uc.get_data().com.objs[&rd32(&uc, out)], crate::com::Obj::DPlay));
+        assert!(enumerate(&mut uc, 0x40_1000, 0xc0de, 0x7f00_0100).is_none());
+        let (target, args, rest, eax) = take_call(&mut uc);
+        assert_eq!((target, args[2], args[4], eax, rest.len()), (0x40_1000, 6, 0xc0de, Some(DP_OK), 0));
+        assert_eq!(rd_bytes(&uc, args[0], 16), GUID_TCPIP);
+        assert!(rd_cstr(&uc, args[1]).contains("TCP/IP"));
+    }
+
+    #[test]
+    fn caps_and_trivial_methods() {
+        let mut uc = com_uc();
+        let caps = scratch(&mut uc, 64);
+        wr32(&mut uc, caps, 40);
+        assert_eq!(call(&mut uc, "GetCaps", &[caps]), Some(DP_OK));
+        assert_eq!((rd32(&uc, caps + 20), rd32(&uc, caps + 24)), (4, 10000));
+        let small = scratch(&mut uc, 64);
+        wr32(&mut uc, small, 8);
+        call(&mut uc, "GetCaps", &[small]);
+        assert_eq!(rd32(&uc, small + 20), 0, "structures older than 40 bytes are left alone");
+        for m in ["InitializeConnection", "SetSessionDesc", "SetPlayerName", "SetPlayerData", "EnableNewPlayers", "Initialize"] {
+            assert_eq!(call(&mut uc, m, &[]), Some(DP_OK), "{m}");
+        }
+        assert_eq!(call(&mut uc, "Frobnicate", &[]), Some(E_FAIL));
+        assert_eq!(call(&mut uc, "Send", &[1, 2, 0x40_2000, 4]), Some(DP_OK), "sending with no session is dropped quietly");
+        assert_eq!(call(&mut uc, "DestroyPlayer", &[9]), Some(DP_OK));
+    }
+
+    #[test]
+    fn player_and_session_calls_fail_cleanly_without_a_session() {
+        let mut uc = com_uc();
+        let (id, name) = (scratch(&mut uc, 4), scratch(&mut uc, 16));
+        wr_cstr(&mut uc, 0x40_2000, "alice", 16);
+        wr32(&mut uc, name + 8, 0x40_2000);
+        assert_eq!(call(&mut uc, "CreatePlayer", &[id, name]), Some(E_FAIL));
+        assert_eq!(call(&mut uc, "CreatePlayer", &[id, 0]), Some(E_FAIL));
+        // Joining a session nobody advertised.
+        let sd = scratch(&mut uc, 80);
+        wr32(&mut uc, sd + 8, 0x1234_5678);
+        assert_eq!(call(&mut uc, "Open", &[sd, 1]), Some(E_FAIL));
+        // Session description: the buffer size is reported either way.
+        let (buf, size) = (scratch(&mut uc, 128), scratch(&mut uc, 4));
+        wr32(&mut uc, size, 10);
+        assert_eq!(call(&mut uc, "GetSessionDesc", &[buf, size]), Some(DPERR_BUFFERTOOSMALL));
+        assert_eq!(rd32(&uc, size), 81);
+        wr32(&mut uc, size, 128);
+        assert_eq!(call(&mut uc, "GetSessionDesc", &[buf, size]), Some(DP_OK));
+        assert_eq!(rd32(&uc, buf), 80);
+        assert_eq!(call(&mut uc, "Close", &[]), Some(DP_OK));
+        // No players: EnumPlayers returns at once without calling the guest.
+        assert_eq!(call(&mut uc, "EnumPlayers", &[0, 0x40_1000, 0, 0]), Some(DP_OK));
+        assert!(uc.get_data().pending.is_none());
+    }
+
+    #[test]
+    fn enum_sessions_with_nothing_found_asks_for_a_host_address_once() {
+        let _serial = crate::net::NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut uc = com_uc();
+        assert!(call(&mut uc, "EnumSessions", &[0, 0, 0x40_1000, 0xabc]).is_none());
+        let (target, args, rest, eax) = take_call(&mut uc);
+        // Only the final DPESC_TIMEDOUT callback: no session, flag 1.
+        assert_eq!((target, args[0], args[2], args[3], eax, rest.len()), (0x40_1000, 0, 1, 0xabc, Some(DP_OK), 0));
+        assert!(uc.get_data().ui.want_host_address);
+        uc.get_data_mut().ui.want_host_address = false;
+        call(&mut uc, "EnumSessions", &[0, 0, 0x40_1000, 0xabc]);
+        take_call(&mut uc);
+        assert!(!uc.get_data().ui.want_host_address, "not asked a second time for the same screen");
+        call(&mut uc, "Close", &[]);
+        call(&mut uc, "EnumSessions", &[0, 0, 0x40_1000, 0xabc]);
+        take_call(&mut uc);
+        assert!(uc.get_data().ui.want_host_address, "asked again after the session is closed");
+    }
+
+    #[test]
+    fn receive_turns_network_events_into_directplay_messages() {
+        let mut uc = com_uc();
+        let (from, to, size, buf) = (scratch(&mut uc, 4), scratch(&mut uc, 4), scratch(&mut uc, 4), scratch(&mut uc, 256));
+        let recv = |uc: &mut Uc, flags: u32| call(uc, "Receive", &[from, to, flags, buf, size]).unwrap();
+        assert_eq!(recv(&mut uc, 0), DPERR_NOMESSAGES);
+        for ev in [
+            Event::PlayerAdd { id: 5, name: "bob".into() },
+            Event::Data { from: 5, to: 6, data: b"payload".to_vec() },
+            Event::PlayerDel { id: 5 },
+            Event::SessionLost,
+        ] {
+            dp(&mut uc).net.inject(ev);
+        }
+        let count = scratch(&mut uc, 4);
+        call(&mut uc, "GetMessageCount", &[0, count]);
+        assert_eq!(rd32(&uc, count), 4);
+        // Buffer too small: the needed size is reported and the message stays queued.
+        wr32(&mut uc, size, 4);
+        assert_eq!(recv(&mut uc, 0), DPERR_BUFFERTOOSMALL);
+        assert_eq!(rd32(&uc, size), 48 + 4);
+        // DPMSG_CREATEPLAYERORGROUP, peeked first (flag 0x20), then consumed.
+        wr32(&mut uc, size, 256);
+        assert_eq!(recv(&mut uc, 0x20), DP_OK);
+        assert_eq!((rd32(&uc, from), rd32(&uc, buf), rd32(&uc, buf + 8)), (0, 3, 5));
+        assert_eq!((rd32(&uc, buf + 32), rd32(&uc, buf + 36)), (buf + 48, buf + 48), "string pointers are fixed up");
+        assert_eq!(rd_cstr(&uc, buf + 48), "bob");
+        wr32(&mut uc, size, 256);
+        assert_eq!(recv(&mut uc, 0), DP_OK);
+        call(&mut uc, "GetMessageCount", &[0, count]);
+        assert_eq!(rd32(&uc, count), 3);
+        // Application data keeps its sender and recipient.
+        wr32(&mut uc, size, 256);
+        assert_eq!(recv(&mut uc, 0), DP_OK);
+        assert_eq!((rd32(&uc, from), rd32(&uc, to), rd32(&uc, size)), (5, 6, 7));
+        assert_eq!(rd_bytes(&uc, buf, 7), b"payload");
+        // DPMSG_DELETEPLAYERORGROUP then DPSYS_SESSIONLOST.
+        wr32(&mut uc, size, 256);
+        recv(&mut uc, 0);
+        assert_eq!((rd32(&uc, buf), rd32(&uc, buf + 8), rd32(&uc, size)), (5, 5, 44));
+        wr32(&mut uc, size, 256);
+        recv(&mut uc, 0);
+        assert_eq!(rd32(&uc, buf), 0x31);
+        assert_eq!(recv(&mut uc, 0), DPERR_NOMESSAGES);
+    }
+}

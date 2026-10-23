@@ -489,4 +489,103 @@ mod tests {
         assert_eq!(run(&mut uc, "tech agricultura x"), "QUANTIDADE INVALIDA");
         assert_eq!(run(&mut uc, "tech"), "agricultura 0, militar 0, civil 0, religiao 0");
     }
+
+    /// Replaces the game functions the console calls with `mov eax, N ; ret`, to check the wiring and arguments.
+    fn stub_game_functions(uc: &mut Uc) {
+        for addr in [0x470f98u32, 0x475118, 0x47fc1b, 0x47d314, 0x457b87, 0x457122, 0x4530fd, 0x44fe42, 0x445fbc] {
+            // Records the register arguments it was called with at 0x403000 + (addr & 0xff) * 16.
+            let log = 0x40_3000 + (addr & 0xff) * 16;
+            let mut code = vec![0xa3];
+            code.extend_from_slice(&log.to_le_bytes()); // mov [log], eax
+            code.extend_from_slice(&[0x89, 0x15]);
+            code.extend_from_slice(&(log + 4).to_le_bytes()); // mov [log+4], edx
+            code.extend_from_slice(&[0x89, 0x1d]);
+            code.extend_from_slice(&(log + 8).to_le_bytes()); // mov [log+8], ebx
+            code.extend_from_slice(&[0x89, 0x0d]);
+            code.extend_from_slice(&(log + 12).to_le_bytes()); // mov [log+12], ecx
+            code.extend_from_slice(&[0xb8, 1, 0, 0, 0, 0xc3]); // mov eax, 1 ; ret
+            wr_bytes(uc, addr, &code);
+        }
+    }
+
+    fn args_of(uc: &Uc, addr: u32) -> [u32; 4] {
+        let log = 0x40_3000 + (addr & 0xff) * 16;
+        [rd32(uc, log), rd32(uc, log + 4), rd32(uc, log + 8), rd32(uc, log + 12)]
+    }
+
+    #[test]
+    fn grudge_diplo_and_aiexec_call_the_game_with_the_right_arguments() {
+        let mut uc = game();
+        stub_game_functions(&mut uc);
+        assert_eq!(run(&mut uc, "grudge 1 2 9"), "EVENTO APLICADO");
+        assert_eq!(args_of(&uc, 0x475118), [1, 2, 9, 0]);
+        assert_eq!(run(&mut uc, "diplo 0 2"), "PROPOSTA ENVIADA");
+        assert_eq!(&args_of(&uc, 0x47fc1b)[..2], [0, 2]);
+        assert_eq!(run(&mut uc, "aiexec 2 3"), "EXECUTOR RODOU 3x");
+        assert_eq!(args_of(&uc, 0x47d314)[0], 0x5148b0 + 2 * 16);
+        run(&mut uc, "aiexec 9");
+        assert_eq!(args_of(&uc, 0x47d314)[0], 0x5148b0 + 4 * 16, "the clan index is capped at 4");
+    }
+
+    #[test]
+    fn game_faults_are_reported_not_fatal() {
+        let mut uc = game();
+        // Nothing but zero bytes at the target: `add [eax], al` through eax=a faults or runs on; either way a text answer comes back.
+        wr_bytes(&mut uc, 0x475118, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        assert!(run(&mut uc, "grudge 0 1 2").starts_with("falha no jogo em"));
+        wr_bytes(&mut uc, 0x47fc1b, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        assert!(run(&mut uc, "diplo 0 1").starts_with("falha no jogo"));
+        wr_bytes(&mut uc, 0x47d314, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        assert!(run(&mut uc, "aiexec 1").starts_with("falha no jogo"));
+        wr_bytes(&mut uc, 0x470f98, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        assert!(run(&mut uc, "tech militar 3").starts_with("falha no jogo"));
+    }
+
+    #[test]
+    fn tech_researches_missing_items_and_updates_the_totals() {
+        let mut uc = game();
+        stub_game_functions(&mut uc);
+        wr_bytes(&mut uc, TECH_DONE + 16 + 1, &[2]); // player 1, area "militar": 2 done
+        wr_bytes(&mut uc, TECH_TOTAL + 1, &[10]);
+        assert_eq!(run(&mut uc, "tech militar 5 1"), "militar: 5 DESCOBERTAS");
+        assert_eq!(rd_bytes(&uc, TECH_DONE + 16 + 1, 1), [5]);
+        assert_eq!(rd_bytes(&uc, TECH_TOTAL + 1, 1), [13]);
+        assert_eq!(args_of(&uc, 0x470f98), [1, 4, 1, 1], "the last call researches item 4 of area 1 for player 1");
+        // Asking for fewer than already known changes nothing; the count is capped at 30.
+        run(&mut uc, "tech 1 3 1");
+        assert_eq!(rd_bytes(&uc, TECH_DONE + 16 + 1, 1), [5]);
+        run(&mut uc, "tech civil 99");
+        assert_eq!(rd_bytes(&uc, TECH_DONE + 2, 1), [30]);
+        assert_eq!(run(&mut uc, "tech"), "agricultura 0, militar 0, civil 30, religiao 0");
+    }
+
+    #[test]
+    fn spawn_creates_a_unit_in_the_first_free_slot() {
+        let mut uc = game();
+        stub_game_functions(&mut uc);
+        let table = 0x50_0000u32;
+        wr32(&mut uc, 0x4e19a0, table);
+        wr_bytes(&mut uc, table + 0x114 * 1 + 2, &[7]); // slot 1 is taken
+        assert_eq!(run(&mut uc, "spawn 4 10 12 2"), "UNIDADE 4 CRIADA NO SLOT 2 EM (10,12)");
+        assert_eq!(rd_bytes(&uc, table + 0x114 * 2, 1), [2], "owner");
+        assert_eq!(rd_bytes(&uc, table + 0x114 * 2 + 2, 1), [7], "state");
+        assert_eq!(args_of(&uc, 0x457b87), [2, (12 << 8) | 10, 0, 4]);
+        assert_eq!(args_of(&uc, 0x445fbc)[..2], [2, (12 << 8) | 10]);
+        // Without coordinates it goes next to the first building (tile in the entity table, +2 columns, +4 rows).
+        wr_bytes(&mut uc, BLD_TABLE + 2, &(5u16 << 8 | 3).to_le_bytes());
+        assert!(run(&mut uc, "spawn 1").contains("EM (5,9)"));
+        // A full table answers politely.
+        for i in 1..800u32 {
+            wr_bytes(&mut uc, table + i * 0x114 + 2, &[7]);
+        }
+        assert_eq!(run(&mut uc, "spawn 1 1 1"), "SEM ESPACO NA TABELA");
+        // A game function that faults aborts the spawn with its address (fresh guest: Unicorn may keep
+        // translated copies of code that was already executed and then overwritten).
+        let mut uc = game();
+        stub_game_functions(&mut uc);
+        wr32(&mut uc, 0x4e19a0, table);
+        wr_bytes(&mut uc, 0x445fbc, &[0xa1, 0x78, 0x56, 0x34, 0x12, 0xc3]);
+        let r = run(&mut uc, "spawn 1 1 1");
+        assert!(r.starts_with("ERRO EM 0x445fbc"), "{r}");
+    }
 }

@@ -191,3 +191,57 @@ mod tests {
         assert_eq!(img.imports[0].name, "Foo");
     }
 }
+
+/// Builds tiny executables for tests that run real guest code.
+#[cfg(test)]
+pub mod testing {
+    /// Guest address of the IAT slot of the `i`-th import passed to [`exe`].
+    pub fn slot(i: usize) -> u32 {
+        0x40_2100 + 4 * i as u32
+    }
+
+    /// A PE32 with `code` at 0x401000 (the entry point) and the named imports (all from `KERNEL32.dll`;
+    /// names like `#2` import by ordinal). The image spans 0x400000..0x404000; 0x403000 is free scratch.
+    pub fn exe(code: &[u8], imports: &[&str]) -> Vec<u8> {
+        assert!(code.len() <= 0x1000 && imports.len() < 20);
+        let mut d = vec![0u8; 0x1600];
+        let put32 = |d: &mut [u8], at: usize, v: u32| d[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        d[..2].copy_from_slice(b"MZ");
+        put32(&mut d, 0x3c, 0x40);
+        d[0x40..0x44].copy_from_slice(b"PE\0\0");
+        d[0x46..0x48].copy_from_slice(&2u16.to_le_bytes());
+        d[0x54..0x56].copy_from_slice(&0xe0u16.to_le_bytes());
+        let opt = 0x58;
+        d[opt..opt + 2].copy_from_slice(&0x10bu16.to_le_bytes());
+        put32(&mut d, opt + 16, 0x1000);
+        put32(&mut d, opt + 28, 0x40_0000);
+        put32(&mut d, opt + 56, 0x4000);
+        put32(&mut d, opt + 60, 0x200);
+        put32(&mut d, opt + 104, 0x2000);
+        for (i, (va, raw, size)) in [(0x1000u32, 0x200u32, 0x1000u32), (0x2000, 0x1200, 0x400)].into_iter().enumerate() {
+            let s = opt + 0xe0 + i * 40;
+            put32(&mut d, s + 8, size);
+            put32(&mut d, s + 12, va);
+            put32(&mut d, s + 16, size);
+            put32(&mut d, s + 20, raw);
+        }
+        d[0x200..0x200 + code.len()].copy_from_slice(code);
+        // .idata: descriptor at 0x2000, thunks at 0x2100, DLL name at 0x2180, hint/name entries from 0x2200.
+        put32(&mut d, 0x1200, 0x2100);
+        put32(&mut d, 0x1200 + 12, 0x2180);
+        put32(&mut d, 0x1200 + 16, 0x2100);
+        d[0x1380..0x138d].copy_from_slice(b"KERNEL32.dll\0");
+        for (i, name) in imports.iter().enumerate() {
+            let thunk = 0x1300 + i * 4;
+            if let Some(ord) = name.strip_prefix('#') {
+                put32(&mut d, thunk, 0x8000_0000 | ord.parse::<u32>().unwrap());
+            } else {
+                let rva = 0x2200 + i * 0x20;
+                put32(&mut d, thunk, rva as u32);
+                let at = 0x1200 + (rva - 0x2000) + 2;
+                d[at..at + name.len()].copy_from_slice(name.as_bytes());
+            }
+        }
+        d
+    }
+}

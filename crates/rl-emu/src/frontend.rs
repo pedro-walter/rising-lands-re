@@ -103,7 +103,9 @@ fn vk_of(k: Keycode) -> Option<u8> {
         _ if (b'a' as i32..=b'z' as i32).contains(&c) => (c - 32) as u8,
         _ if (b'0' as i32..=b'9' as i32).contains(&c) => c as u8,
         _ if (Keycode::F1.into_i32()..=Keycode::F12.into_i32()).contains(&c) => 0x70 + (c - Keycode::F1.into_i32()) as u8,
-        _ if (Keycode::Kp0.into_i32()..=Keycode::Kp9.into_i32()).contains(&c) => 0x60 + (c - Keycode::Kp0.into_i32()) as u8,
+        // SDL orders the keypad digits 1..9 and then 0, so `Kp0..=Kp9` would be an empty range.
+        Keycode::Kp0 => 0x60,
+        _ if (Keycode::Kp1.into_i32()..=Keycode::Kp9.into_i32()).contains(&c) => 0x61 + (c - Keycode::Kp1.into_i32()) as u8,
         _ => return None,
     })
 }
@@ -430,4 +432,231 @@ pub fn activate(uc: &mut Uc) {
     post(uc, WM_ACTIVATEAPP, 1, 0);
     post(uc, WM_ACTIVATE, 1, 0);
     post(uc, WM_SETFOCUS, 0, 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::testing::{bare_uc, com_uc};
+    use sdl2::keyboard::Mod;
+
+    fn msgs(uc: &mut Uc) -> Vec<(u32, u32, u32)> {
+        uc.get_data_mut().msgs.drain(..).map(|m| (m.message, m.wparam, m.lparam)).collect()
+    }
+
+    #[test]
+    fn host_keys_map_to_windows_virtual_keys() {
+        assert_eq!(vk_of(Keycode::Left), Some(0x25));
+        assert_eq!(vk_of(Keycode::Return), Some(0x0d));
+        assert_eq!(vk_of(Keycode::KpEnter), Some(0x0d));
+        assert_eq!(vk_of(Keycode::RShift), Some(0x10));
+        assert_eq!(vk_of(Keycode::LCtrl), Some(0x11));
+        assert_eq!(vk_of(Keycode::RAlt), Some(0x12));
+        assert_eq!(vk_of(Keycode::Delete), Some(0x2e));
+        assert_eq!(vk_of(Keycode::Space), Some(0x20));
+        assert_eq!(vk_of(Keycode::A), Some(b'A'));
+        assert_eq!(vk_of(Keycode::Z), Some(b'Z'));
+        assert_eq!(vk_of(Keycode::Num0), Some(b'0'));
+        assert_eq!(vk_of(Keycode::Num9), Some(b'9'));
+        assert_eq!(vk_of(Keycode::F1), Some(0x70));
+        assert_eq!(vk_of(Keycode::F11), Some(0x7a));
+        assert_eq!(vk_of(Keycode::Kp0), Some(0x60));
+        assert_eq!(vk_of(Keycode::Kp1), Some(0x61));
+        assert_eq!(vk_of(Keycode::Kp5), Some(0x65));
+        assert_eq!(vk_of(Keycode::Kp9), Some(0x69));
+        assert_eq!(vk_of(Keycode::Backquote), None);
+    }
+
+    #[test]
+    fn injected_input_becomes_window_messages() {
+        let mut uc = bare_uc();
+        inject_mouse(&mut uc, 10, 20, None);
+        assert_eq!(uc.get_data().cursor, (10, 20));
+        inject_mouse(&mut uc, 5, 6, Some((false, true)));
+        inject_mouse(&mut uc, 5, 6, Some((false, false)));
+        inject_mouse(&mut uc, 5, 6, Some((true, true)));
+        inject_mouse(&mut uc, 5, 6, Some((true, false)));
+        inject_mouse_msg(&mut uc, 7, 8, Some((false, true)), true);
+        let lp = |x: u32, y: u32| (y << 16) | x;
+        assert_eq!(
+            msgs(&mut uc),
+            [(WM_MOUSEMOVE, 0, lp(10, 20)), (WM_LBUTTONDOWN, 0, lp(5, 6)), (WM_LBUTTONUP, 0, lp(5, 6)), (WM_RBUTTONDOWN, 0, lp(5, 6)), (WM_RBUTTONUP, 0, lp(5, 6)), (WM_LBUTTONDBLCLK, 0, lp(7, 8))]
+        );
+        assert!(uc.get_data().keys[1] && !uc.get_data().keys[2]);
+        inject_key(&mut uc, 0x41, true);
+        inject_key(&mut uc, 0x41, false);
+        inject_key(&mut uc, 0x0d, true);
+        assert_eq!(msgs(&mut uc), [(WM_KEYDOWN, 0x41, 1), (WM_KEYUP, 0x41, 0xc000_0001), (WM_KEYDOWN, 0x0d, 1), (WM_CHAR, 0x0d, 1)]);
+        activate(&mut uc);
+        assert_eq!(msgs(&mut uc), [(WM_ACTIVATEAPP, 1, 0), (WM_ACTIVATE, 1, 0), (WM_SETFOCUS, 0, 0)]);
+    }
+
+    #[test]
+    fn toast_replaces_the_previous_message() {
+        let mut ui = Ui::default();
+        ui.toast("one");
+        ui.toast(String::from("two"));
+        assert_eq!(ui.toast.as_ref().map(|t| t.0.as_str()), Some("two"));
+    }
+
+    #[test]
+    fn ingame_view_is_recognised_by_the_stone_bar() {
+        let bar = |c: [u8; 4]| {
+            let mut px = vec![0u8; 800 * 600 * 4];
+            for x in 0..800 {
+                px[(590 * 800 + x) * 4..(590 * 800 + x) * 4 + 4].copy_from_slice(&c);
+            }
+            (800, 600, px)
+        };
+        assert!(looks_ingame(&bar([100, 100, 100, 255])));
+        assert!(!looks_ingame(&bar([200, 40, 40, 255])), "coloured menu");
+        assert!(!looks_ingame(&bar([10, 10, 10, 255])), "too dark");
+        assert!(!looks_ingame(&(640, 480, vec![0; 640 * 480 * 4])), "only the 800x600 layout is checked");
+    }
+
+    /// SDL's Rust wrapper cannot queue text-input events, so push the raw event.
+    fn push_text(text: &str) {
+        // SAFETY: a zeroed SDL_Event is valid; the text event is fully initialised before it is pushed, and SDL copies it.
+        unsafe {
+            let mut e: sdl2::sys::SDL_Event = std::mem::zeroed();
+            e.text.type_ = sdl2::sys::SDL_EventType::SDL_TEXTINPUT as u32;
+            for (i, b) in text.bytes().take(31).enumerate() {
+                e.text.text[i] = b as _;
+            }
+            assert_eq!(sdl2::sys::SDL_PushEvent(&mut e), 1);
+        }
+    }
+
+    /// Everything that needs a window runs in one test: SDL allows a single live context, and the
+    /// dummy video/audio drivers keep it headless.
+    #[test]
+    fn window_events_are_translated_for_the_guest() {
+        std::env::set_var("SDL_VIDEODRIVER", "dummy");
+        std::env::set_var("SDL_AUDIODRIVER", "dummy");
+        let mixer: crate::audio::Shared = Default::default();
+        let mut fe = match Frontend::new(1, mixer) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("skipping: no dummy SDL video driver here ({e})");
+                return;
+            }
+        };
+        let mut uc = com_uc();
+        let ev = fe._sdl.event().unwrap();
+        let key = |k: Keycode, down: bool, md: Mod| {
+            let (timestamp, window_id, scancode, repeat) = (0, 0, None, false);
+            if down { Event::KeyDown { timestamp, window_id, keycode: Some(k), scancode, keymod: md, repeat } } else { Event::KeyUp { timestamp, window_id, keycode: Some(k), scancode, keymod: md, repeat } }
+        };
+        let mouse = |down: Option<bool>, btn: MouseButton, x: i32, y: i32, clicks: u8| match down {
+            Some(true) => Event::MouseButtonDown { timestamp: 0, window_id: 0, which: 0, mouse_btn: btn, clicks, x, y },
+            Some(false) => Event::MouseButtonUp { timestamp: 0, window_id: 0, which: 0, mouse_btn: btn, clicks, x, y },
+            None => Event::MouseMotion { timestamp: 0, window_id: 0, which: 0, mousestate: sdl2::mouse::MouseState::from_sdl_state(0), x, y, xrel: 0, yrel: 0 },
+        };
+        let none = Mod::empty();
+        // Window creation queues focus events; start from a clean slate.
+        for _ in 0..3 {
+            fe.pump(&mut uc);
+        }
+        msgs(&mut uc);
+
+        // Keyboard and mouse.
+        for e in [key(Keycode::Left, true, none), key(Keycode::Left, false, none), key(Keycode::Return, true, none), mouse(None, MouseButton::Left, 12, 34, 0), mouse(Some(true), MouseButton::Left, 12, 34, 1), mouse(Some(false), MouseButton::Left, 12, 34, 1), mouse(Some(true), MouseButton::Right, 1, 2, 1), mouse(Some(true), MouseButton::Left, 3, 4, 2)] {
+            ev.push_event(e).unwrap();
+        }
+        assert!(fe.pump(&mut uc));
+        let got = msgs(&mut uc);
+        let kinds: Vec<u32> = got.iter().map(|m| m.0).collect();
+        assert_eq!(kinds, [WM_KEYDOWN, WM_KEYUP, WM_KEYDOWN, WM_CHAR, WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN, WM_LBUTTONDBLCLK]);
+        assert_eq!(got[0].1, 0x25);
+        assert_eq!(uc.get_data().cursor, (3, 4));
+        // The left press and release in one pass: the release is held back one pass so the game sees the button.
+        assert!(uc.get_data().keys[1], "released late, not in the same pass");
+        assert!(fe.pump(&mut uc));
+        assert!(!uc.get_data().keys[1], "the next pass applies the late release");
+
+        // Speed keys and Ctrl +/-.
+        ev.push_event(key(Keycode::F3, true, none)).unwrap();
+        assert!(fe.pump(&mut uc));
+        assert_eq!(uc.get_data().speed, 2.0);
+        assert!(uc.get_data().ui.toast.as_ref().is_some_and(|t| t.0.contains("2X")));
+        ev.push_event(key(Keycode::F1, true, none)).unwrap();
+        ev.push_event(key(Keycode::KpPlus, true, Mod::LCTRLMOD)).unwrap();
+        fe.pump(&mut uc);
+        assert_eq!(uc.get_data().speed, 1.0);
+        assert_eq!((1.0 / uc.get_data().frame_interval.as_secs_f64()).round() as i32, 35);
+        ev.push_event(key(Keycode::Minus, true, Mod::RCTRLMOD)).unwrap();
+        fe.pump(&mut uc);
+        assert_eq!((1.0 / uc.get_data().frame_interval.as_secs_f64()).round() as i32, 30);
+
+        // WASD scrolling is opt-in with Alt+W, and then sets the arrow-key state.
+        ev.push_event(key(Keycode::W, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(!uc.get_data().keys[0x26], "WASD is off by default");
+        assert_eq!(msgs(&mut uc).iter().filter(|m| m.1 == b'W' as u32).count(), 1);
+        ev.push_event(key(Keycode::W, true, Mod::LALTMOD)).unwrap();
+        ev.push_event(key(Keycode::W, true, none)).unwrap();
+        ev.push_event(key(Keycode::A, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(uc.get_data().keys[0x26] && uc.get_data().keys[0x25]);
+        ev.push_event(key(Keycode::W, false, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(!uc.get_data().keys[0x26]);
+
+        // Text typed outside the prompt reaches the game as WM_CHAR.
+        msgs(&mut uc);
+        push_text("hi");
+        fe.pump(&mut uc);
+        assert_eq!(msgs(&mut uc), [(WM_CHAR, b'h' as u32, 1), (WM_CHAR, b'i' as u32, 1)]);
+
+        // F12 opens the console prompt: keys go to it instead of the game, Enter runs the command.
+        ev.push_event(key(Keycode::F12, true, none)).unwrap();
+        push_text("poke 401000 9 1");
+        ev.push_event(key(Keycode::Return, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert_eq!(crate::machine::rd_bytes(&uc, 0x40_1000, 1), [9]);
+        assert!(msgs(&mut uc).is_empty(), "nothing leaked to the game");
+        assert!(fe.prompt.is_none());
+        // The host-address prompt: asked for by the join screen, Backspace edits, Enter submits, Escape cancels.
+        uc.get_data_mut().ui.want_host_address = true;
+        uc.get_data_mut().ui.last_host = "10.0.0.1".into();
+        ev.push_event(key(Keycode::Backspace, true, none)).unwrap();
+        push_text("5 !");
+        ev.push_event(key(Keycode::Return, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert_eq!(uc.get_data().ui.submitted_host.as_deref(), Some("10.0.0.5"));
+        uc.get_data_mut().ui.want_host_address = true;
+        ev.push_event(key(Keycode::Escape, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(fe.prompt.is_none());
+        assert_eq!(uc.get_data().ui.submitted_host.as_deref(), Some("10.0.0.5"));
+
+        // Drawing: a toast and a prompt over a presented frame, then a movie frame.
+        let mem = uc.get_data_mut().alloc(640 * 480);
+        uc.get_data_mut().com.objs.insert(0x100, crate::com::Obj::Surface(crate::com::Surface { w: 640, h: 480, mem, palette: None, back: None, key: None }));
+        uc.get_data_mut().com.primary = Some(0x100);
+        uc.get_data_mut().com.frames_presented = 1;
+        uc.get_data_mut().ui.toast("hello");
+        fe.present(&mut uc);
+        assert!(fe.last_frame.is_some() && fe.toast_drawn.as_deref() == Some("hello"));
+        fe.prompt = Some("abc".into());
+        fe.present(&mut uc);
+        uc.get_data_mut().com.frames_presented = 2;
+        fe.present(&mut uc);
+        assert_eq!(fe.shown, 2);
+        assert_eq!(fe.tex_size, (640, 480), "the texture follows the game's resolution");
+        let avi = crate::video::Avi::parse(b"RIFF\0\0\0\0AVI ").unwrap();
+        let mut player = crate::video::Player::new(avi);
+        player.avi.width = 4;
+        player.avi.height = 4;
+        player.dec = crate::video::Cinepak::new(4, 4);
+        player.dirty = true;
+        uc.get_data_mut().video = Some(player);
+        fe.present(&mut uc);
+        assert!(fe.movie_tex.is_some());
+        assert!(!uc.get_data().video.as_ref().unwrap().dirty);
+
+        // Closing the window ends the loop.
+        ev.push_event(Event::Quit { timestamp: 0 }).unwrap();
+        assert!(!fe.pump(&mut uc));
+    }
 }

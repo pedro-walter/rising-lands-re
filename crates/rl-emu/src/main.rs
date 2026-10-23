@@ -312,3 +312,137 @@ fn video_tick(m: &mut machine::Machine) {
     let Some(v) = st.video.as_mut() else { return };
     v.tick();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use machine::testing::machine;
+
+    fn step(cmd: &str, arg: &str) -> Step {
+        Step { at: 0.0, cmd: cmd.into(), arg: arg.into() }
+    }
+
+    #[test]
+    fn script_parsing_orders_steps_and_adds_release_events() {
+        let v = parse_script("2:click:10,20; 0.5:move:1,2;3:key:13;4:rclick:5,6;5:dclick:7,8;bogus;x:move:1,1;6:quit");
+        let got: Vec<_> = v.iter().map(|s| (s.at, s.cmd.as_str(), s.arg.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                (0.5, "move", "1,2"),
+                (2.0, "click", "10,20"),
+                (2.25, "up", "10,20"),
+                (3.0, "key", "13"),
+                (3.2, "keyup", "13"),
+                (4.0, "rclick", "5,6"),
+                (4.25, "rup", "5,6"),
+                (5.0, "dclick", "7,8"),
+                (5.25, "dup", "7,8"),
+                (6.0, "quit", ""),
+            ]
+        );
+        assert!(parse_script("").is_empty());
+        // Arguments may contain colons (`dbg poke 496fe4 3 1`).
+        assert_eq!(parse_script("1:dbg:res all 5")[0].arg, "res all 5");
+    }
+
+    #[test]
+    fn coordinate_parsing_is_forgiving() {
+        assert_eq!(xy("400, 296"), (400, 296));
+        assert_eq!(xy("x,y"), (0, 0));
+        assert_eq!(xy("12"), (0, 0));
+        assert_eq!(xy("-5,7"), (-5, 7));
+    }
+
+    #[test]
+    fn script_steps_drive_the_guest_input_queue() {
+        let mut m = machine(&[0xeb, 0xfe], &[]);
+        assert!(run_script_step(&mut m, &step("move", "10,20")));
+        assert_eq!(m.uc.get_data().cursor, (10, 20));
+        assert!(run_script_step(&mut m, &step("click", "30,40")));
+        let msgs: Vec<_> = m.uc.get_data().msgs.iter().map(|x| x.message).collect();
+        assert_eq!(msgs, [0x200, 0x200, 0x201]);
+        assert!(m.uc.get_data().keys[1]);
+        // `parse_script` names the release events "up" / "rup" / "dup" (the click name minus "click").
+        run_script_step(&mut m, &step("up", "30,40"));
+        assert!(!m.uc.get_data().keys[1]);
+        run_script_step(&mut m, &step("rclick", "1,1"));
+        assert!(m.uc.get_data().keys[2]);
+        run_script_step(&mut m, &step("rup", "1,1"));
+        assert!(!m.uc.get_data().keys[2]);
+        run_script_step(&mut m, &step("dclick", "1,1"));
+        assert_eq!(m.uc.get_data().msgs.back().unwrap().message, 0x203);
+        m.uc.get_data_mut().msgs.clear();
+        run_script_step(&mut m, &step("key", "27"));
+        run_script_step(&mut m, &step("keyup", " 27 "));
+        let msgs: Vec<_> = m.uc.get_data().msgs.iter().map(|x| (x.message, x.wparam)).collect();
+        assert_eq!(msgs, [(0x100, 27), (0x102, 27), (0x101, 27)]);
+        assert!(!m.uc.get_data().keys[27]);
+        // Diagnostics and the debug console run against guest memory.
+        wr_bytes_for_test(&mut m, 0x40_3000, &[1, 2, 3, 4]);
+        assert!(run_script_step(&mut m, &step("mem", "403000:4")));
+        machine::wr32(&mut m.uc, 0x4e19a0, 0x60_0000);
+        machine::wr_bytes(&mut m.uc, 0x60_0000 + 0x114 * 3 + 2, &[7]);
+        assert!(run_script_step(&mut m, &step("bld", "")));
+        assert!(run_script_step(&mut m, &step("dbg", "poke 403010 77 1")));
+        assert_eq!(machine::rd_bytes(&m.uc, 0x40_3010, 1), [77]);
+        assert!(run_script_step(&mut m, &step("shot", "")), "no primary surface: nothing written, script goes on");
+        assert!(run_script_step(&mut m, &step("frobnicate", "")));
+        assert!(!run_script_step(&mut m, &step("quit", "")));
+    }
+
+    fn wr_bytes_for_test(m: &mut machine::Machine, a: u32, b: &[u8]) {
+        machine::wr_bytes(&mut m.uc, a, b);
+    }
+
+    #[test]
+    fn user_directory_prefers_the_override() {
+        std::env::set_var("RL_USERDIR", "/tmp/rl-custom-userdir");
+        assert_eq!(userdir(), PathBuf::from("/tmp/rl-custom-userdir"));
+        std::env::remove_var("RL_USERDIR");
+        assert!(userdir().ends_with("rising-lands"));
+    }
+
+    #[test]
+    fn screenshot_of_the_primary_surface_is_a_png() {
+        let mut m = machine(&[0xeb, 0xfe], &[]);
+        let dir = std::env::temp_dir().join(format!("rl-shot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png_path = dir.join("shot.png");
+        dump(&mut m, None);
+        dump(&mut m, Some(png_path.to_str().unwrap()));
+        assert!(!png_path.exists(), "no surface yet");
+        // A 2x1 primary surface with a palette.
+        let uc = &mut m.uc;
+        let mem = uc.get_data_mut().alloc(2);
+        machine::wr_bytes(uc, mem, &[0, 0]);
+        uc.get_data_mut().com.objs.insert(0x100, com::Obj::Surface(com::Surface { w: 2, h: 1, mem, palette: None, back: None, key: None }));
+        uc.get_data_mut().com.primary = Some(0x100);
+        dump(&mut m, Some(png_path.to_str().unwrap()));
+        let dec = png::Decoder::new(std::fs::File::open(&png_path).unwrap());
+        let r = dec.read_info().unwrap();
+        assert_eq!((r.info().width, r.info().height), (2, 1));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn video_tick_advances_only_when_a_movie_plays() {
+        let mut m = machine(&[0xeb, 0xfe], &[]);
+        video_tick(&mut m);
+        let avi = video::Avi::parse(b"RIFF\0\0\0\0AVI ").unwrap();
+        m.uc.get_data_mut().video = Some(video::Player::new(avi));
+        video_tick(&mut m);
+        assert!(!m.uc.get_data().video.as_ref().unwrap().dirty, "no frames to decode");
+    }
+
+    #[test]
+    fn avi_dump_helper_writes_requested_frames() {
+        let dir = std::env::temp_dir().join(format!("rl-avi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let avi = dir.join("m.avi");
+        std::fs::write(&avi, b"RIFF\0\0\0\0AVI ").unwrap();
+        let args: Vec<String> = ["--avi", avi.to_str().unwrap(), dir.join("f").to_str().unwrap(), "0", "2"].map(String::from).to_vec();
+        assert_eq!(dump_avi(&args), ExitCode::SUCCESS);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

@@ -799,3 +799,475 @@ fn mci_command(uc: &mut Uc, device: u32, msg: u32, flags: u32, params: u32) -> u
 }
 
 const VIDEO_VOICE: u32 = 0xfff0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::testing::{uc_in, with_heap};
+    use std::path::PathBuf;
+
+    struct Env {
+        root: PathBuf,
+        uc: Uc<'static>,
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// Guest with real install/disc/user directories (install holds `RISING.INI`, `Maps/a.txt`).
+    fn env(name: &str) -> Env {
+        let root = std::env::temp_dir().join(format!("rl-win32-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["install/Maps", "disc", "user"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::fs::write(root.join("install/RISING.INI"), "; c\n[SOLDAT]\nRAYON=7 ; x\nName = Soldado\nBAD=abc\nNEG=-3\n[Other]\nRAYON=1\n").unwrap();
+        std::fs::write(root.join("install/Maps/a.txt"), b"hello world").unwrap();
+        std::fs::write(root.join("install/Maps/b.txt"), b"x").unwrap();
+        let uc = with_heap(uc_in(&root.join("install"), &root.join("disc"), &root.join("user")));
+        Env { root, uc }
+    }
+
+    fn imp(uc: &mut Uc, name: &str, a: &[u32]) -> Option<u32> {
+        let idx = uc.get_data().stubs.len();
+        uc.get_data_mut().stubs.push(Stub { name: name.into(), dll: "test.dll".into() });
+        let mut args = [0u32; 14];
+        args[..a.len()].copy_from_slice(a);
+        call_import_inner(uc, idx, 0x7f00_0200, &args)
+    }
+
+    fn call(uc: &mut Uc, name: &str, a: &[u32]) -> u32 {
+        imp(uc, name, a).unwrap_or_else(|| panic!("{name} yielded"))
+    }
+
+    fn cstr(uc: &mut Uc, s: &str) -> u32 {
+        let p = zeroed_alloc(uc, s.len() as u32 + 1);
+        wr_cstr(uc, p, s, s.len() + 1);
+        p
+    }
+
+    fn buf(uc: &mut Uc, n: u32) -> u32 {
+        zeroed_alloc(uc, n)
+    }
+
+    #[test]
+    fn argument_byte_counts_follow_the_calling_convention() {
+        assert_eq!(arg_bytes("k32", "GetTickCount"), (0, false));
+        assert_eq!(arg_bytes("k32", "CloseHandle"), (4, false));
+        assert_eq!(arg_bytes("k32", "FindFirstFileA"), (8, false));
+        assert_eq!(arg_bytes("k32", "OpenFile"), (12, false));
+        assert_eq!(arg_bytes("k32", "ReadFile"), (20, false));
+        assert_eq!(arg_bytes("k32", "CreateFileA"), (28, false));
+        assert_eq!(arg_bytes("u32", "CreateWindowExA"), (48, false));
+        assert_eq!(arg_bytes("dp", "#1"), (12, false));
+        assert_eq!(arg_bytes("u32", "wsprintfA"), (0, true), "cdecl: the caller cleans up");
+        assert_eq!(arg_bytes("x", "NoSuchFunction"), (0, false));
+    }
+
+    #[test]
+    fn printf_formats_widths_flags_and_strings() {
+        let mut e = env("printf");
+        let uc = &mut e.uc;
+        let s = cstr(uc, "str");
+        let args = buf(uc, 64);
+        for (i, v) in [42u32, (-7i32) as u32, 255, s, b'Z' as u32, 7].iter().enumerate() {
+            wr32(uc, args + i as u32 * 4, *v);
+        }
+        assert_eq!(format_printf(uc, "n=%d|%5d|%-4x|", args), "n=42|   -7|ff  |");
+        assert_eq!(format_printf(uc, "%s %c %03u %%", args + 12), "str Z 007 %");
+        assert_eq!(format_printf(uc, "%05d %X", args + 4), "-0007 FF");
+        assert_eq!(format_printf(uc, "%-6s|", args + 12), "str   |");
+        assert_eq!(format_printf(uc, "%6s|", args + 12), "   str|");
+        assert_eq!(format_printf(uc, "plain", args), "plain");
+        assert_eq!(format_printf(uc, "%q!", args), "!", "unknown conversions print nothing");
+    }
+
+    #[test]
+    fn int_prefix_parsing() {
+        assert_eq!(parse_int_prefix("  12abc"), Some(12));
+        assert_eq!(parse_int_prefix("-3"), Some(-3));
+        assert_eq!(parse_int_prefix("abc"), None);
+        assert_eq!(parse_int_prefix(""), None);
+    }
+
+    #[test]
+    fn profile_strings_and_ints_come_from_the_ini() {
+        let mut e = env("ini");
+        let uc = &mut e.uc;
+        let (soldat, other, file) = (cstr(uc, "SOLDAT"), cstr(uc, "other"), cstr(uc, "C:\\RISING\\rising.ini"));
+        let (rayon, name, bad, neg, none) = (cstr(uc, "rayon"), cstr(uc, "NAME"), cstr(uc, "BAD"), cstr(uc, "NEG"), cstr(uc, "nokey"));
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[soldat, rayon, 99, file]), 7);
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[other, rayon, 99, file]), 1);
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[soldat, bad, 99, file]), 99, "unparsable values fall back to the default");
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[soldat, neg, 99, file]) as i32, -3);
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[soldat, none, 55, file]), 55);
+        let missing = cstr(uc, "C:\\nofile.ini");
+        assert_eq!(call(uc, "GetPrivateProfileIntA", &[soldat, rayon, 4, missing]), 4);
+        let (out, def) = (buf(uc, 32), cstr(uc, "dflt"));
+        assert_eq!(call(uc, "GetPrivateProfileStringA", &[soldat, name, def, out, 32, file]), 7);
+        assert_eq!(rd_cstr(uc, out), "Soldado");
+        assert_eq!(call(uc, "GetPrivateProfileStringA", &[soldat, none, def, out, 32, file]), 4);
+        assert_eq!(rd_cstr(uc, out), "dflt");
+        assert_eq!(call(uc, "GetPrivateProfileStringA", &[soldat, name, def, out, 4, file]), 3, "truncated to the buffer");
+    }
+
+    #[test]
+    fn process_environment_and_identity() {
+        let mut e = env("proc");
+        let uc = &mut e.uc;
+        assert_eq!(call(uc, "GetVersion", &[]), 0xc000_0a04);
+        assert_eq!(call(uc, "GetModuleHandleA", &[0]), 0x40_0000);
+        let cmd = call(uc, "GetCommandLineA", &[]);
+        assert_eq!(rd_cstr(uc, cmd), "C:\\RISING\\RISING.EXE");
+        assert_eq!(call(uc, "GetCommandLineA", &[]), cmd, "the string is allocated once");
+        let (name, size) = (buf(uc, 64), buf(uc, 4));
+        assert_eq!(call(uc, "GetModuleFileNameA", &[0, name, 64]), 20);
+        call(uc, "GetUserNameA", &[name, size]);
+        assert_eq!((rd_cstr(uc, name), rd32(uc, size)), ("player".into(), 7));
+        call(uc, "GetComputerNameA", &[name, size]);
+        assert_eq!(rd_cstr(uc, name), "RISING");
+        let ms = buf(uc, 32);
+        call(uc, "GlobalMemoryStatus", &[ms]);
+        assert_eq!(rd32(uc, ms + 8), 128 << 20);
+        assert_eq!(call(uc, "GetStdHandle", &[7]), 7);
+        assert_eq!(call(uc, "GetProcAddress", &[1, 2]), 0);
+        assert!(call(uc, "GetTickCount", &[]) < 5000);
+        assert_eq!(call(uc, "GetSystemMetrics", &[0]), 800);
+        assert_eq!(call(uc, "GetSystemMetrics", &[1]), 600);
+        assert_eq!(call(uc, "GetSystemMetrics", &[2]), 0);
+        let rect = buf(uc, 16);
+        call(uc, "GetWindowRect", &[0, rect]);
+        assert_eq!((rd32(uc, rect + 8), rd32(uc, rect + 12)), (800, 600));
+        assert_eq!(imp(uc, "ExitProcess", &[3]), Some(0));
+        assert!(matches!(uc.get_data_mut().pending.take(), Some(Action::Exit(3))));
+        uc.get_data_mut().last_error = 0;
+        assert_eq!(call(uc, "GetLastError", &[]), 0);
+        assert_eq!(call(uc, "NoSuchApi", &[1]), 0, "unknown imports return 0");
+    }
+
+    #[test]
+    fn tls_slots_and_heap_calls() {
+        let mut e = env("tls");
+        let uc = &mut e.uc;
+        let slot = call(uc, "TlsAlloc", &[]);
+        assert!(slot >= 1);
+        // The slot table is offset by 32 on both sides, so a Set/Get pair round-trips for small indices.
+        assert_eq!(call(uc, "TlsSetValue", &[slot, 0x1234]), 1);
+        assert_eq!(call(uc, "TlsGetValue", &[slot]), 0x1234);
+        assert_eq!(call(uc, "TlsGetValue", &[100_000]), 0, "out of range reads as empty");
+        assert_eq!(call(uc, "TlsSetValue", &[100_000, 1]), 1, "and writes are ignored");
+        let m = call(uc, "GlobalAlloc", &[0, 100]);
+        assert_eq!(rd_bytes(uc, m, 100), vec![0; 100]);
+        assert_eq!(call(uc, "GlobalLock", &[m]), m);
+        assert_eq!(call(uc, "GlobalFree", &[m]), 0);
+        let v = call(uc, "VirtualAlloc", &[0, 4096]);
+        assert_ne!(v, 0);
+        assert_eq!(call(uc, "VirtualFree", &[v]), 1);
+        let (a, b) = (call(uc, "CreateEventA", &[]), call(uc, "CreateMutexA", &[]));
+        assert_ne!(a, b);
+        assert_eq!(call(uc, "WaitForSingleObject", &[a, 0]), 0);
+        assert_eq!(call(uc, "CreateThread", &[0, 0, 0x40_1000]), 0);
+    }
+
+    #[test]
+    fn files_read_write_seek_and_delete() {
+        let mut e = env("files");
+        let uc = &mut e.uc;
+        let p = cstr(uc, "C:\\RISING\\Maps\\a.txt");
+        let h = call(uc, "CreateFileA", &[p, 0x8000_0000, 0, 0, 3]);
+        assert_ne!(h, u32::MAX);
+        let (data, got) = (buf(uc, 32), buf(uc, 4));
+        assert_eq!(call(uc, "ReadFile", &[h, data, 5, got]), 1);
+        assert_eq!((rd_bytes(uc, data, 5), rd32(uc, got)), (b"hello".to_vec(), 5));
+        assert_eq!(call(uc, "SetFilePointer", &[h, 6, 0, 0]), 6);
+        assert_eq!(call(uc, "_hread", &[h, data, 32]), 5);
+        assert_eq!(rd_bytes(uc, data, 5), b"world");
+        assert_eq!(call(uc, "_llseek", &[h, (-5i32) as u32, 2]), 6);
+        assert_eq!(call(uc, "_llseek", &[h, (-2i32) as u32, 1]), 4);
+        assert_eq!(call(uc, "CloseHandle", &[h]), 1);
+        assert_eq!(call(uc, "ReadFile", &[h, data, 5, got]), 0, "closed handle");
+        assert_eq!(call(uc, "_hread", &[h, data, 5]), u32::MAX);
+        assert_eq!(call(uc, "SetFilePointer", &[h, 0, 0, 0]), u32::MAX);
+        let missing = cstr(uc, "C:\\RISING\\nope.bin");
+        assert_eq!(call(uc, "CreateFileA", &[missing, 0x8000_0000, 0, 0, 3]), u32::MAX);
+        // Writing creates the file in the user overlay, and only that copy can be deleted.
+        let sav = cstr(uc, "C:\\RISING\\SAVE\\x.sav");
+        let h = call(uc, "CreateFileA", &[sav, 0x4000_0000, 0, 0, 2]);
+        let src = cstr(uc, "SAVED");
+        assert_eq!(call(uc, "WriteFile", &[h, src, 5, got]), 1);
+        assert_eq!(rd32(uc, got), 5);
+        assert_eq!(call(uc, "_hwrite", &[h, src, 3]), 3);
+        call(uc, "_lclose", &[h]);
+        assert_eq!(std::fs::read(e.root.join("user/SAVE/x.sav")).unwrap(), b"SAVEDSAV");
+        let uc = &mut e.uc;
+        assert_eq!(call(uc, "DeleteFileA", &[sav]), 1);
+        assert_eq!(call(uc, "DeleteFileA", &[p]), 0, "installed files are not deletable");
+        assert!(e.root.join("install/Maps/a.txt").exists());
+        let h = call(uc, "OpenFile", &[p, 0, 0x1000]);
+        assert_ne!(h, u32::MAX, "OF_CREATE opens for writing in the overlay");
+        let newp = cstr(uc, "C:\\RISING\\new.dat");
+        let (ro, rw, cr) = (call(uc, "_lopen", &[p, 0]), call(uc, "_lopen", &[p, 2]), call(uc, "_lcreat", &[newp, 0]));
+        assert!(ro != u32::MAX && rw != u32::MAX && cr != u32::MAX);
+    }
+
+    #[test]
+    fn directories_drives_and_find() {
+        let mut e = env("dirs");
+        let uc = &mut e.uc;
+        let (c, d, z) = (cstr(uc, "C:\\"), cstr(uc, "d:\\"), cstr(uc, "Z:\\"));
+        assert_eq!((call(uc, "GetDriveTypeA", &[c]), call(uc, "GetDriveTypeA", &[d]), call(uc, "GetDriveTypeA", &[z])), (3, 5, 1));
+        let (label, serial, maxlen, flags, fs_name) = (buf(uc, 32), buf(uc, 4), buf(uc, 4), buf(uc, 4), buf(uc, 16));
+        assert_eq!(call(uc, "GetVolumeInformationA", &[c, label, 32, serial, maxlen, flags, fs_name, 16]), 0);
+        assert_eq!(call(uc, "GetVolumeInformationA", &[d, label, 32, serial, maxlen, flags, fs_name, 16]), 1);
+        assert_eq!((rd_cstr(uc, label), rd_cstr(uc, fs_name), rd32(uc, maxlen)), ("RISING_LANDS_BR_".into(), "CDFS".into(), 255));
+        let cwd = buf(uc, 64);
+        assert_eq!(call(uc, "GetCurrentDirectoryA", &[64, cwd]), 9);
+        assert_eq!(rd_cstr(uc, cwd), "C:\\RISING");
+        let maps = cstr(uc, "C:\\RISING\\Maps");
+        assert_eq!(call(uc, "SetCurrentDirectoryA", &[maps]), 1);
+        let nowhere = cstr(uc, "C:\\nowhere");
+        assert_eq!(call(uc, "SetCurrentDirectoryA", &[nowhere]), 0);
+        // Find with a relative pattern, now that the cwd is Maps.
+        let (pat, fd) = (cstr(uc, "*.txt"), buf(uc, 320));
+        let h = call(uc, "FindFirstFileA", &[pat, fd]);
+        assert_ne!(h, u32::MAX);
+        assert_eq!((rd_cstr(uc, fd + 44), rd32(uc, fd), rd32(uc, fd + 32)), ("a.txt".into(), 0x80, 11));
+        assert_eq!(call(uc, "FindNextFileA", &[h, fd]), 1);
+        assert_eq!(rd_cstr(uc, fd + 44), "b.txt");
+        assert_eq!(call(uc, "FindNextFileA", &[h, fd]), 0);
+        assert_eq!(call(uc, "GetLastError", &[]), 18);
+        assert_eq!(call(uc, "FindClose", &[h]), 1);
+        assert_eq!(call(uc, "FindNextFileA", &[h, fd]), 0, "closed find handle");
+        let zzz = cstr(uc, "*.zzz");
+        assert_eq!(call(uc, "FindFirstFileA", &[zzz, fd]), u32::MAX);
+        assert_eq!(call(uc, "GetLastError", &[]), 2);
+        // A directory reports the directory attribute.
+        let (rising, maps_dir) = (cstr(uc, "C:\\RISING"), cstr(uc, "Maps"));
+        call(uc, "SetCurrentDirectoryA", &[rising]);
+        call(uc, "FindFirstFileA", &[maps_dir, fd]);
+        assert_eq!(rd32(uc, fd), 0x10);
+    }
+
+    #[test]
+    fn window_classes_creation_and_messages() {
+        let mut e = env("windows");
+        let uc = &mut e.uc;
+        let (cls, wc) = (cstr(uc, "RisingClass"), buf(uc, 48));
+        wr32(uc, wc + 4, 0x40_2000);
+        wr32(uc, wc + 36, cls);
+        assert_eq!(call(uc, "RegisterClassA", &[wc]), 0xc001);
+        // CreateWindowExA: arguments a[0..12]; class name in a[1]. The window procedure gets WM_CREATE.
+        let mut args = [0u32; 12];
+        args[1] = cstr(uc, "risingclass");
+        let hwnd = call(uc, "CreateWindowExA", &args);
+        assert_eq!(hwnd, 0x1000);
+        match uc.get_data_mut().pending.take() {
+            Some(Action::Call { target, args, set_eax, .. }) => assert_eq!((target, args[0], args[1], set_eax), (0x40_2000, 0x1000, 1, Some(0x1000))),
+            _ => panic!("WM_CREATE not queued"),
+        }
+        assert_eq!(uc.get_data().windows.len(), 1);
+        // SendMessage / DispatchMessage run the window procedure; unknown windows do nothing.
+        assert_eq!(call(uc, "SendMessageA", &[hwnd, 0x111, 5, 6]), 0);
+        assert!(matches!(uc.get_data_mut().pending.take(), Some(Action::Call { target: 0x40_2000, .. })));
+        let msg = buf(uc, 28);
+        for (i, v) in [hwnd, 0x100, 7, 8].iter().enumerate() {
+            wr32(uc, msg + i as u32 * 4, *v);
+        }
+        call(uc, "DispatchMessageA", &[msg]);
+        match uc.get_data_mut().pending.take() {
+            Some(Action::Call { args, .. }) => assert_eq!(args, [hwnd, 0x100, 7, 8]),
+            _ => panic!(),
+        }
+        call(uc, "SendMessageA", &[0x9999, 1, 2, 3]);
+        assert!(uc.get_data().pending.is_none());
+        // Message queue: Peek without remove leaves it; Get removes.
+        uc.get_data_mut().msgs.push_back(Msg { hwnd, message: 0x201, wparam: 1, lparam: 2 });
+        assert_eq!(call(uc, "PeekMessageA", &[msg, 0, 0, 0, 0]), 1);
+        assert_eq!(rd32(uc, msg + 4), 0x201);
+        assert_eq!(uc.get_data().msgs.len(), 1);
+        assert_eq!(call(uc, "PeekMessageA", &[msg, 0, 0, 0, 1]), 1);
+        assert!(uc.get_data().msgs.is_empty());
+        // Empty queue: Get returns an idle message, Peek returns 0 after pacing the frame.
+        assert_eq!(call(uc, "GetMessageA", &[msg, 0, 0, 0]), 1);
+        assert_eq!((rd32(uc, msg), rd32(uc, msg + 4)), (0x1000, 0));
+        uc.get_data_mut().frame_interval = std::time::Duration::from_millis(1);
+        assert_eq!(call(uc, "PeekMessageA", &[msg, 0, 0, 0, 1]), 0);
+        // After PostQuitMessage: Get answers WM_QUIT with 0, Peek with a WM_QUIT message.
+        call(uc, "PostQuitMessage", &[0]);
+        assert_eq!(call(uc, "GetMessageA", &[msg, 0, 0, 0]), 0);
+        assert_eq!(rd32(uc, msg + 4), 0x12);
+        assert_eq!(call(uc, "PeekMessageA", &[msg, 0, 0, 0, 1]), 1);
+    }
+
+    #[test]
+    fn input_cursor_and_keys() {
+        let mut e = env("input");
+        let uc = &mut e.uc;
+        let pt = buf(uc, 8);
+        uc.get_data_mut().cursor = (-50, 9999);
+        call(uc, "GetCursorPos", &[pt]);
+        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (0, 599), "clamped to the 800x600 screen");
+        call(uc, "SetCursorPos", &[300, 200]);
+        call(uc, "GetCursorPos", &[pt]);
+        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (300, 200));
+        uc.get_data_mut().keys[0x41] = true;
+        assert_eq!(call(uc, "GetAsyncKeyState", &[0x41]), 0x8001);
+        assert_eq!(call(uc, "GetAsyncKeyState", &[0x42]), 0);
+        assert_eq!(call(uc, "GetAsyncKeyState", &[0x1000]), 0, "out-of-range key codes are not pressed");
+    }
+
+    #[test]
+    fn import_dispatch_yields_to_the_host_in_the_message_pump() {
+        let mut e = env("yield");
+        let uc = &mut e.uc;
+        uc.get_data_mut().stubs.push(Stub { name: "GetMessageA".into(), dll: "user32.dll".into() });
+        uc.get_data_mut().stubs.push(Stub { name: "GetAsyncKeyState".into(), dll: "user32.dll".into() });
+        uc.get_data_mut().stubs.push(Stub { name: "GetVersion".into(), dll: "kernel32.dll".into() });
+        let msg = buf(uc, 28);
+        let mut a = [0u32; 14];
+        a[0] = msg;
+        assert_eq!(call_import(uc, 0, 0x7f00_0300, &a), None);
+        assert!(matches!(uc.get_data_mut().pending.take(), Some(Action::Resume { pc: 0x7f00_0300, set_eax: Some(1) })));
+        // A released key does not yield; a pressed one does.
+        a[0] = 0x41;
+        assert_eq!(call_import(uc, 1, 0x7f00_0310, &a), Some(0));
+        uc.get_data_mut().keys[0x41] = true;
+        assert_eq!(call_import(uc, 1, 0x7f00_0310, &a), None);
+        uc.get_data_mut().pending = None;
+        assert_eq!(call_import(uc, 2, 0, &a), Some(0xc000_0a04));
+        assert_eq!(uc.get_data().api_counts["GetVersion"], 1);
+    }
+
+    #[test]
+    fn wsprintf_reads_cdecl_arguments_from_the_stack() {
+        let mut e = env("wsprintf");
+        let uc = &mut e.uc;
+        let (out, fmt) = (buf(uc, 64), cstr(uc, "%s=%d"));
+        let (key, esp) = (cstr(uc, "hp"), reg(uc, RegisterX86::ESP));
+        // [esp] return address, [esp+4] buffer, [esp+8] format, [esp+12...] varargs.
+        wr32(uc, esp + 12, key);
+        wr32(uc, esp + 16, 90);
+        assert_eq!(call(uc, "wsprintfA", &[out, fmt]), 5);
+        assert_eq!(rd_cstr(uc, out), "hp=90");
+    }
+
+    #[test]
+    fn scroll_click_assist_aligns_the_frame_counter_once_per_click() {
+        let mut e = env("scroll");
+        let uc = &mut e.uc;
+        wr_bytes(uc, 0x4e2f78, &[0x11]);
+        wr32(uc, 0x508f7c, 123);
+        scroll_click_assist(uc);
+        assert_eq!(rd32(uc, 0x508f7c), 123, "no click: untouched");
+        wr_bytes(uc, 0x5099ae, &[1]);
+        scroll_click_assist(uc);
+        assert_eq!(rd32(uc, 0x508f7c), 129);
+        wr32(uc, 0x508f7c, 140);
+        scroll_click_assist(uc);
+        assert_eq!(rd32(uc, 0x508f7c), 140, "same click: not realigned");
+        wr_bytes(uc, 0x5099ae, &[0]);
+        scroll_click_assist(uc);
+        wr_bytes(uc, 0x4e2f78, &[0x05]);
+        wr_bytes(uc, 0x5099ae, &[1]);
+        scroll_click_assist(uc);
+        assert_eq!(rd32(uc, 0x508f7c), 140, "only on the mission text screens");
+    }
+
+    #[test]
+    fn frame_pacing_sleeps_up_to_the_frame_budget() {
+        let mut e = env("pace");
+        let uc = &mut e.uc;
+        uc.get_data_mut().frame_interval = std::time::Duration::from_millis(40);
+        pace_frame(uc); // first call only sets the deadline
+        let t0 = std::time::Instant::now();
+        pace_frame(uc);
+        assert!(t0.elapsed() >= std::time::Duration::from_millis(25), "{:?}", t0.elapsed());
+        // At 4x speed the budget shrinks to a quarter.
+        uc.get_data_mut().speed = 4.0;
+        pace_frame(uc);
+        let t0 = std::time::Instant::now();
+        pace_frame(uc);
+        assert!(t0.elapsed() < std::time::Duration::from_millis(30));
+    }
+
+    #[test]
+    fn cd_audio_through_mci_strings() {
+        let mut e = env("mci");
+        // 2 s of stereo 16-bit silence for track 2.
+        std::fs::write(e.root.join("disc/track02.raw"), vec![0u8; 44100 * 4 * 2]).unwrap();
+        let uc = &mut e.uc;
+        let (ret, mci) = (buf(uc, 32), |uc: &mut Uc, ret: u32, c: &str| {
+            let p = cstr(uc, c);
+            call(uc, "mciSendStringA", &[p, ret, 32, 0])
+        });
+        assert_eq!(mci(uc, ret, "open cd type cdaudio alias cd"), 0);
+        assert_eq!(mci(uc, ret, "status cd number of tracks"), 0);
+        assert_eq!(rd_cstr(uc, ret), "3");
+        assert_eq!(mci(uc, ret, "status cd length track 2"), 0);
+        assert_eq!(rd_cstr(uc, ret), "2000");
+        assert_eq!(mci(uc, ret, "set cd time format tmsf"), 0);
+        assert_eq!(mci(uc, ret, "status cd length track 2"), 0);
+        assert_eq!(rd_cstr(uc, ret), "00:02:00");
+        assert_eq!(mci(uc, ret, "status cd length track 9"), 263, "missing track");
+        assert_eq!(mci(uc, ret, "play cd from 258"), 0, "tmsf: the low byte is the track");
+        assert!(uc.get_data().mixer.lock().unwrap().cd.is_some());
+        assert_eq!(mci(uc, ret, "stop cd"), 0);
+        assert!(uc.get_data().mixer.lock().unwrap().cd.is_none());
+        assert_eq!(mci(uc, ret, "play cd from 7"), 263);
+        assert_eq!(mci(uc, ret, "close cd"), 0);
+        assert_eq!(mci(uc, ret, "frobnicate"), 263);
+        assert_eq!(mci(uc, 0, "status cd number of tracks"), 0, "no reply buffer is fine");
+        assert_eq!(call(uc, "MCIWndCreateA", &[]), 0);
+    }
+
+    #[test]
+    fn movie_playback_through_mci_commands() {
+        let mut e = env("movie");
+        std::fs::write(e.root.join("disc/intro.avi"), b"RIFF\0\0\0\0AVI ").unwrap();
+        let uc = &mut e.uc;
+        let (params, name) = (buf(uc, 32), cstr(uc, "D:\\intro.avi"));
+        wr32(uc, params + 12, name);
+        // Open: the movie is parsed and parked until MCI_PLAY.
+        assert_eq!(call(uc, "mciSendCommandA", &[0, 0x803, 0, params]), 0);
+        assert_eq!(rd32(uc, params + 4), 1);
+        assert!(uc.get_data().video_open.is_some());
+        assert_eq!(call(uc, "mciSendCommandA", &[1, 0x806, 0, params]), 0);
+        assert!(uc.get_data().video.is_some() && uc.get_data().video_open.is_none());
+        call(uc, "mciSendCommandA", &[1, 0x814, 0, params]);
+        assert_eq!(rd32(uc, params + 4), 0x20e, "playing");
+        uc.get_data_mut().video.as_mut().unwrap().finished = true;
+        call(uc, "mciSendCommandA", &[1, 0x814, 0, params]);
+        assert_eq!(rd32(uc, params + 4), 0x20d, "stopped");
+        assert_eq!(call(uc, "mciSendCommandA", &[1, 0x804, 0, params]), 0);
+        assert!(uc.get_data().video.is_none());
+        // A missing movie (or --skip-intro) reports success without video, so the game carries on.
+        let nope = cstr(uc, "D:\\nope.avi");
+        wr32(uc, params + 12, nope);
+        assert_eq!(call(uc, "mciSendCommandA", &[0, 0x803, 0, params]), 0);
+        assert!(uc.get_data().video_open.is_none());
+        uc.get_data_mut().skip_movies = true;
+        wr32(uc, params + 12, name);
+        call(uc, "mciSendCommandA", &[0, 0x803, 0, params]);
+        assert!(uc.get_data().video_open.is_none());
+        assert_eq!(call(uc, "mciSendCommandA", &[0, 0x999, 0, params]), 0);
+    }
+
+    #[test]
+    fn directx_entry_points_create_objects() {
+        let mut e = env("dx");
+        let uc = &mut e.uc;
+        let out = buf(uc, 4);
+        assert_eq!(call(uc, "DirectDrawCreate", &[0, out]), 0);
+        assert_ne!(rd32(uc, out), 0);
+        assert_eq!(call(uc, "DirectSoundCreate", &[0, out]), 0);
+        assert_eq!(call(uc, "#1", &[0, out]), 0);
+        assert_eq!(imp(uc, "#2", &[0x40_1000, 0x55]), None, "DirectPlayEnumerate calls back into the guest");
+        assert!(uc.get_data_mut().pending.take().is_some());
+        let (text, title) = (cstr(uc, "text"), cstr(uc, "title"));
+        assert_eq!(call(uc, "MessageBoxA", &[0, text, title, 0]), 1);
+        assert_eq!(call(uc, "GetOpenFileNameA", &[0]), 0);
+    }
+}

@@ -20,7 +20,7 @@ jobs:
       - name: Build tools and emulator
         run: cargo build --release -p rl-tool -p rl-emu
       - name: Unit tests (no game data needed)
-        run: cargo test --release -p rl-emu -p rl-assets
+        run: cargo test --release -p rl-emu -p rl-assets -p rl-tool
       - uses: actions/upload-artifact@v4
         with:
           name: rising-lands-${{ matrix.os }}
@@ -30,3 +30,22 @@ jobs:
             target/release/rl-tool
             target/release/rl-tool.exe
           if-no-files-found: ignore
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: SDL2
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Test coverage (no game data needed)
+        run: |
+          cargo llvm-cov --workspace --lcov --output-path lcov.info --fail-under-lines 85
+          cargo llvm-cov report --summary-only
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info

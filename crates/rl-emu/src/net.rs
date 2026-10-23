@@ -51,6 +51,8 @@ struct Conn {
 
 struct Core {
     hosting: bool,
+    /// TCP port the host listens on (0 until `host` runs).
+    listen_port: u16,
     joined: bool,
     session: SessionInfo,
     next_id: u32,
@@ -169,6 +171,7 @@ impl Net {
         let extra_hosts = std::env::var("RL_JOIN").map(|v| v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()).unwrap_or_default();
         let core = Core {
             hosting: false,
+            listen_port: 0,
             joined: false,
             session: SessionInfo::default(),
             next_id: 1,
@@ -188,6 +191,18 @@ impl Net {
     }
 
     /// Starts looking for sessions on the LAN and at any `RL_JOIN` addresses.
+    /// TCP port this process is hosting on, once `host` has run.
+    #[cfg(test)]
+    pub fn listen_port(&self) -> u16 {
+        self.core.lock().unwrap().listen_port
+    }
+
+    /// Queues an event as if it had arrived from the network.
+    #[cfg(test)]
+    pub fn inject(&self, ev: Event) {
+        let _ = self.tx.send(ev);
+    }
+
     pub fn start_discovery(&self) {
         {
             let mut c = self.core.lock().unwrap();
@@ -278,6 +293,7 @@ impl Net {
         {
             let mut c = self.core.lock().unwrap();
             c.hosting = true;
+            c.listen_port = port;
             c.session = info;
         }
         eprintln!("[net] hosting on TCP port {port}");
@@ -615,13 +631,78 @@ fn client_reader(mut stream: TcpStream, core: Arc<Mutex<Core>>, tx: Sender<Event
     let _ = tx.send(Event::SessionLost);
 }
 
+/// Tests that host a session or run LAN discovery share one port, so they take this lock.
+#[cfg(test)]
+pub static NET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn strings_and_integers_decode_defensively() {
+        let mut out = Vec::new();
+        put_str(&mut out, "alice");
+        put_str(&mut out, &"x".repeat(300));
+        let mut p = 0;
+        assert_eq!(get_str(&out, &mut p), "alice");
+        assert_eq!(get_str(&out, &mut p).len(), 255, "long names are cut to 255 bytes");
+        // Reading past the end yields empty/zero values instead of panicking.
+        assert_eq!(get_str(&out, &mut p), "");
+        assert_eq!(get_u32(&[1, 2], &mut 0), 0);
+        let mut p = 0;
+        assert_eq!(get_u32(&[1, 0, 0, 0, 9], &mut p), 1);
+        assert_eq!(p, 4);
+    }
+
+    #[test]
+    fn session_description_round_trips() {
+        let s = SessionInfo { guid: [1; 16], app_guid: [2; 16], name: "Sess\u{e3}o".into(), max_players: 4, flags: 0x20, players: vec![(7, "ana".into()), (9, "bo".into())], addr: None };
+        let bytes = encode_session(&s, 4242);
+        let (d, port) = decode_session(&bytes).unwrap();
+        assert_eq!(port, 4242);
+        assert_eq!((d.guid, d.app_guid, d.max_players, d.flags), ([1; 16], [2; 16], 4, 0x20));
+        assert_eq!(d.players, s.players);
+        assert!(decode_session(&bytes[..20]).is_none());
+        let mut cut = bytes.clone();
+        cut.truncate(32 + 1 + s.name.len() + 8);
+        assert!(decode_session(&cut).is_none(), "no port or player count");
+    }
+
+    #[test]
+    fn frames_are_length_prefixed_and_bounded() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut a = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut b, _) = l.accept().unwrap();
+        assert!(write_frame(&mut a, b"hello"));
+        assert!(write_frame(&mut a, b""));
+        assert_eq!(read_frame(&mut b), Some(b"hello".to_vec()));
+        assert_eq!(read_frame(&mut b), Some(Vec::new()));
+        // An absurd length is refused rather than allocated.
+        a.write_all(&(2u32 << 20).to_le_bytes()).unwrap();
+        assert_eq!(read_frame(&mut b), None);
+        // A closed peer ends the stream.
+        drop(a);
+        assert_eq!(read_frame(&mut b), None);
+    }
+
+    #[test]
+    fn a_fresh_net_has_no_session_or_players() {
+        let n = Net::new();
+        assert!(n.players().is_empty());
+        assert!(n.sessions().is_empty());
+        assert!(n.public_address().is_none());
+        assert!(n.session_by_guid(&[0; 16]).is_none());
+        assert!(n.create_player("x").is_err(), "no session to join or host");
+        n.send(1, 2, b"nobody listens");
+        n.destroy_player(99);
+        n.close();
+    }
+
     /// A host and a client on loopback: players appear on both sides and data flows both ways.
     #[test]
     fn host_and_client_exchange_messages() {
+        let _serial = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("RL_NO_UPNP", "1");
         let host = Net::new();
         host.host(SessionInfo { name: "test".into(), max_players: 4, ..Default::default() }).unwrap();
@@ -629,11 +710,8 @@ mod tests {
 
         let client = Net::new();
         let mut info = SessionInfo::default();
-        // The listener falls back to an ephemeral port when 47624 is taken; discover it by trying both.
-        let sess = host.session();
-        info.guid = sess.guid;
-        let port = [PORT].into_iter().find(|p| TcpStream::connect_timeout(&SocketAddr::new(Ipv4Addr::LOCALHOST.into(), *p), Duration::from_millis(500)).is_ok());
-        let Some(port) = port else { return }; // port busy with something else: skip
+        info.guid = host.session().guid;
+        let port = host.listen_port();
         info.addr = Some(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port));
         client.join(&info).unwrap();
         let client_player = client.create_player("bob").unwrap();
@@ -653,5 +731,61 @@ mod tests {
         assert!(matches!(ev, Event::Data { ref data, .. } if data == b"world"), "{ev:?}");
         host.close();
         client.close();
+    }
+
+    /// Waits for `f` to hold, up to a few seconds.
+    fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
+        let t0 = Instant::now();
+        while !f() {
+            assert!(t0.elapsed() < Duration::from_secs(6), "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn discovery_finds_a_hosted_session_and_departures_are_announced() {
+        let _serial = NET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("RL_NO_UPNP", "1");
+        // A previous test's discovery socket may still be shutting down.
+        thread::sleep(Duration::from_millis(500));
+        let host = Net::new();
+        host.host(SessionInfo { name: "LAN game".into(), max_players: 3, flags: 0x20, app_guid: [9; 16], ..Default::default() }).unwrap();
+        let alice = host.create_player("alice").unwrap();
+        assert_eq!(host.session().name, "LAN game");
+        assert_ne!(host.session().guid, [0; 16], "a session id is made up when the game gives none");
+        assert!(host.players().iter().any(|(id, n, local)| *id == alice && n == "alice" && *local));
+
+        let client = Net::new();
+        client.add_host("127.0.0.1");
+        client.add_host("127.0.0.1");
+        client.add_host("  ");
+        assert_eq!(client.core.lock().unwrap().extra_hosts, ["127.0.0.1"], "duplicates and blanks are ignored");
+        client.start_discovery();
+        client.start_discovery(); // a second call does not start another probe
+        wait_for("the session to be discovered", || !client.sessions().is_empty());
+        let found = client.sessions().remove(0);
+        assert_eq!((found.name.as_str(), found.max_players, found.flags, found.app_guid), ("LAN game", 3, 0x20, [9; 16]));
+        assert_eq!(found.players, [(alice, "alice".to_string())]);
+        assert_eq!(client.session_by_guid(&found.guid).map(|s| s.name), Some("LAN game".into()));
+
+        client.join(&found).unwrap();
+        wait_for("the host's session details", || client.session().name == "LAN game");
+        let bob = client.create_player("bob").unwrap();
+        wait_for("bob to be listed on the host", || host.players().iter().any(|(id, _, _)| *id == bob));
+        // Broadcast (to = 0) from the host reaches the client; a directed message from the client reaches the host.
+        host.send(alice, 0, b"to all");
+        wait_for("broadcast", || matches!(client.rx.try_recv(), Ok(Event::Data { ref data, .. }) if data == b"to all"));
+        client.send(bob, alice, b"to alice");
+        wait_for("directed message", || matches!(host.rx.try_recv(), Ok(Event::Data { to, ref data, .. }) if to == alice && data == b"to alice"));
+        // Leaving removes the player on the host, and the host's players are announced as gone to others.
+        client.destroy_player(bob);
+        wait_for("bob to leave", || !host.players().iter().any(|(id, _, _)| *id == bob));
+        let bob2 = client.create_player("bob2").unwrap();
+        wait_for("bob2", || host.players().iter().any(|(id, _, _)| *id == bob2));
+        client.close();
+        wait_for("bob2's disconnect", || !host.players().iter().any(|(id, _, _)| *id == bob2));
+        client.stop_discovery();
+        assert!(!client.core.lock().unwrap().discovering);
+        host.close();
     }
 }
