@@ -476,10 +476,13 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
             _ => 0,
         },
         "GetCursorPos" => {
+            const EDGE_BAND: i32 = 20;
             // Always inside the 800x600 screen: the original indexed tables with the raw cursor
             // position and crashed when it came back from outside the window (archer bug).
             let (x, y) = uc.get_data().cursor;
             let (x, y) = (x.clamp(0, 799), y.clamp(0, 599));
+            // With edge scrolling off, the game never sees the pointer in the band it scrolls from.
+            let (x, y) = if uc.get_data().block_edges { (x.clamp(EDGE_BAND, 799 - EDGE_BAND), y.clamp(EDGE_BAND, 599 - EDGE_BAND)) } else { (x, y) };
             wr32(uc, a[0], x as u32);
             wr32(uc, a[0] + 4, y as u32);
             1
@@ -1113,6 +1116,11 @@ mod tests {
         call(uc, "SetCursorPos", &[300, 200]);
         call(uc, "GetCursorPos", &[pt]);
         assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (300, 200));
+        uc.get_data_mut().block_edges = true;
+        uc.get_data_mut().cursor = (0, 599);
+        call(uc, "GetCursorPos", &[pt]);
+        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (20, 579), "kept off the edges when scrolling is off");
+        uc.get_data_mut().block_edges = false;
         uc.get_data_mut().keys[0x41] = true;
         assert_eq!(call(uc, "GetAsyncKeyState", &[0x41]), 0x8001);
         assert_eq!(call(uc, "GetAsyncKeyState", &[0x42]), 0);

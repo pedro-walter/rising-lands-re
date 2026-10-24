@@ -207,7 +207,12 @@ fn main() -> ExitCode {
         None
     } else {
         match frontend::Frontend::new(1, m.uc.get_data().mixer.clone()) {
-            Ok(f) => Some(f),
+            Ok(mut f) => {
+                if let Ok(t) = std::fs::read_to_string(userdir().join(options::FILE)) {
+                    f.set_prefs(options::Prefs::parse(&t));
+                }
+                Some(f)
+            }
             Err(e) => {
                 eprintln!("error: cannot open a window: {e}");
                 return ExitCode::FAILURE;

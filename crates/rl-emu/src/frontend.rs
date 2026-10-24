@@ -1,6 +1,6 @@
 //! SDL2 window: presents the guest's primary surface and feeds input to the guest.
 
-use crate::{com, machine::*, options::Options, overlay};
+use crate::{com, machine::*, options::{Options, Prefs}, overlay};
 use std::time::Instant;
 use sdl2::{
     event::{Event, WindowEvent},
@@ -77,6 +77,8 @@ pub struct Frontend {
     cursor_drawn: Option<(i32, i32)>,
     /// The volume options (F10), when open.
     options: Option<Options>,
+    /// The on/off switches of the options menu.
+    prefs: Prefs,
     mixer: crate::audio::Shared,
 }
 
@@ -145,7 +147,18 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None, options: None, mixer })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None, options: None, prefs: Prefs::default(), mixer })
+    }
+
+    /// Applies saved switches at start-up.
+    pub fn set_prefs(&mut self, prefs: Prefs) {
+        self.prefs = prefs;
+        self.apply_fullscreen();
+    }
+
+    fn apply_fullscreen(&mut self) {
+        let kind = if self.prefs.fullscreen { sdl2::video::FullscreenType::Desktop } else { sdl2::video::FullscreenType::Off };
+        let _ = self.canvas.window_mut().set_fullscreen(kind);
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -163,6 +176,7 @@ impl Frontend {
             uc.get_data_mut().keys[vk] = false;
         }
         self.pressed_now.clear();
+        uc.get_data_mut().block_edges = !self.prefs.edge_scroll && self.ingame;
         let events: Vec<Event> = self.events.poll_iter().collect();
         for e in events {
             // While the prompt is open it gets all the keyboard input.
@@ -276,9 +290,9 @@ impl Frontend {
                 Event::KeyDown { keycode: Some(Keycode::F4), .. } => {}
                 Event::KeyUp { keycode: Some(Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4), .. } => {}
                 Event::KeyDown { keycode: Some(Keycode::Return), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
-                    let w = self.canvas.window_mut();
-                    let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;
-                    let _ = w.set_fullscreen(if full { sdl2::video::FullscreenType::Off } else { sdl2::video::FullscreenType::Desktop });
+                    self.prefs.fullscreen = !self.prefs.fullscreen;
+                    self.apply_fullscreen();
+                    self.save_options(uc, self.mixer.lock().map(|m| m.volumes).unwrap_or_default());
                 }
                 Event::KeyDown { keycode: Some(Keycode::W), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
                     self.wasd = !self.wasd;
@@ -326,26 +340,26 @@ impl Frontend {
         let Some(o) = self.options.as_mut() else { return true };
         let (w, h) = (self.tex_size.0 as usize, self.tex_size.1 as usize);
         let mut vol = self.mixer.lock().map(|m| m.volumes).unwrap_or_default();
-        let before = vol;
+        let (before, prefs_before) = (vol, self.prefs);
         let mut close = false;
         match *e {
             Event::KeyDown { keycode: Some(k), .. } => match k {
                 Keycode::Up => o.select(-1),
                 Keycode::Down | Keycode::Tab => o.select(1),
-                Keycode::Left => o.adjust(&mut vol, -1),
-                Keycode::Right => o.adjust(&mut vol, 1),
-                Keycode::Home => *vol.slot(o.sel) = 0,
-                Keycode::End => *vol.slot(o.sel) = 100,
+                Keycode::Left => o.adjust(&mut vol, &mut self.prefs, -1),
+                Keycode::Right => o.adjust(&mut vol, &mut self.prefs, 1),
+                Keycode::Home if o.sel < crate::options::SLIDERS => *vol.slot(o.sel) = 0,
+                Keycode::End if o.sel < crate::options::SLIDERS => *vol.slot(o.sel) = 100,
                 Keycode::Escape | Keycode::F10 | Keycode::Return | Keycode::KpEnter => close = true,
                 _ => {}
             },
             Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => {
-                o.pointer(&mut vol, w, h, x, y, true);
+                o.pointer(&mut vol, &mut self.prefs, w, h, x, y, true);
             }
             Event::MouseMotion { x, y, .. } => {
                 uc.get_data_mut().cursor = (x, y);
                 if o.drag.is_some() {
-                    o.pointer(&mut vol, w, h, x, y, false);
+                    o.pointer(&mut vol, &mut self.prefs, w, h, x, y, false);
                 }
             }
             Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => o.drag = None,
@@ -357,13 +371,20 @@ impl Frontend {
                 m.volumes = vol;
             }
         }
+        if self.prefs.fullscreen != prefs_before.fullscreen {
+            self.apply_fullscreen();
+        }
         if close {
             self.options = None;
-            let _ = std::fs::write(uc.get_data().vfs.overlay.join(crate::options::FILE), vol.to_text());
+            self.save_options(uc, vol);
             // The next frame must redraw without the panel.
             self.was_overlay = true;
         }
         false
+    }
+
+    fn save_options(&self, uc: &Uc, vol: crate::audio::Volumes) {
+        let _ = std::fs::write(uc.get_data().vfs.overlay.join(crate::options::FILE), vol.to_text() + &self.prefs.to_text());
     }
 
     /// The game draws its pointer only over the map; elsewhere (menus, bottom bar) we draw one.
@@ -429,7 +450,7 @@ impl Frontend {
         }
         if let Some(o) = &self.options {
             let mut vol = self.mixer.lock().map(|m| m.volumes).unwrap_or_default();
-            o.draw(&mut rgba, stride, h as usize, &mut vol);
+            o.draw(&mut rgba, stride, h as usize, &mut vol, self.prefs);
         }
         if let Some((cx, cy)) = hc {
             overlay::draw_arrow(&mut rgba, w as usize, h as usize, cx, cy);
@@ -740,6 +761,22 @@ mod tests {
         ev.push_event(key(Keycode::F10, true, none)).unwrap();
         fe.pump(&mut uc);
         assert!(fe.options.is_none(), "F10 toggles it closed again");
+
+        // The switches: F10, down to "edge scroll", Left turns it off; saved with the volumes.
+        uc.get_data_mut().vfs.overlay = dir.clone();
+        std::fs::create_dir_all(&dir).unwrap();
+        fe.ingame = true;
+        for k in [Keycode::F10, Keycode::Up, Keycode::Up, Keycode::Left, Keycode::Escape] {
+            ev.push_event(key(k, true, none)).unwrap();
+        }
+        fe.pump(&mut uc);
+        assert!(!fe.prefs.edge_scroll && !fe.prefs.fullscreen);
+        fe.pump(&mut uc);
+        assert!(uc.get_data().block_edges, "the game no longer sees the pointer at the edges");
+        let saved = std::fs::read_to_string(dir.join(crate::options::FILE)).unwrap();
+        assert_eq!(Prefs::parse(&saved), fe.prefs);
+        fe.ingame = false;
+        std::fs::remove_dir_all(&dir).ok();
 
         // Drawing: a toast and a prompt over a presented frame, then a movie frame.
         let mem = uc.get_data_mut().alloc(640 * 480);

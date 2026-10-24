@@ -111,6 +111,8 @@ pub struct State {
     pub speed: f64,
     /// Set while the click flag has been seen (see `scroll_click_assist`).
     pub click_aligned: bool,
+    /// The edge-scroll switch is off and the map is showing: `GetCursorPos` keeps the pointer off the screen edges.
+    pub block_edges: bool,
     /// `--skip-intro`: the game's movies are reported as missing so it moves on at once.
     pub skip_movies: bool,
     /// Debug console: finish buildings the moment they are placed.
@@ -160,6 +162,7 @@ impl State {
             ),
             speed: 1.0,
             click_aligned: false,
+            block_edges: false,
             skip_movies: false,
             instant_build: false,
             next_frame: Instant::now(),
