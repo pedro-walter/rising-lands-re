@@ -351,6 +351,8 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             let b = new_object(uc, "IDirectSoundBuffer", DSBUFFER, Obj::DsBuffer { mem, size, primary });
             if !primary {
                 let mut v = crate::audio::Voice::new(size as usize);
+                // The sound loader's hook says which bank the sound being started comes from.
+                v.kind = std::mem::take(&mut uc.get_data_mut().sound_kind);
                 apply_format(uc, rd32(uc, desc + 16), &mut v);
                 uc.get_data().mixer.lock().unwrap().voices.insert(b, v);
             }
@@ -781,6 +783,24 @@ mod tests {
         let out = scratch(uc, 4);
         assert_eq!(direct_sound_create(uc, out), 0);
         rd32(uc, out)
+    }
+
+    #[test]
+    fn new_buffers_take_the_kind_of_the_sound_being_loaded_and_duplicates_keep_it() {
+        use crate::audio::Kind;
+        let mut uc = com_uc();
+        let ds = dsound(&mut uc);
+        let fmt = wave_format(&mut uc, 1, 22050, 8);
+        let plain = dsound_buffer(&mut uc, ds, 16, fmt);
+        uc.get_data_mut().sound_kind = Kind::Building;
+        let hammer = dsound_buffer(&mut uc, ds, 16, fmt);
+        assert_eq!(uc.get_data().sound_kind, Kind::Effect, "the hook's kind is used up by one buffer");
+        let again = dsound_buffer(&mut uc, ds, 16, fmt);
+        let out = scratch(&mut uc, 4);
+        assert_eq!(call(&mut uc, ds, "DuplicateSoundBuffer", &[hammer, out]), 0);
+        let dup = rd32(&uc, out);
+        let m = uc.get_data().mixer.lock().unwrap();
+        assert_eq!((m.voices[&plain].kind, m.voices[&hammer].kind, m.voices[&again].kind, m.voices[&dup].kind), (Kind::Effect, Kind::Building, Kind::Effect, Kind::Building));
     }
 
     #[test]

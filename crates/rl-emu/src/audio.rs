@@ -7,6 +7,87 @@ use std::{
 
 pub const OUT_RATE: u32 = 44100;
 
+/// What a sound is, for the volume options.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Effect,
+    /// Unit voices (sound bank `P`).
+    Speech,
+    /// Building noises, the builder's hammer among them (sound bank `B`).
+    Building,
+}
+
+/// Guest addresses of the game's three sound banks (`A`, `B`, `P`); the loader receives one of them.
+const BANK_B: u32 = 0x521fe4;
+const BANK_P: u32 = 0x522000;
+
+impl Kind {
+    pub fn of_bank(bank: u32) -> Kind {
+        match bank {
+            BANK_P => Kind::Speech,
+            BANK_B => Kind::Building,
+            _ => Kind::Effect,
+        }
+    }
+}
+
+/// User volumes in percent. Music is the CD audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Volumes {
+    pub music: u8,
+    pub building: u8,
+    pub effects: u8,
+    pub speech: u8,
+}
+
+impl Default for Volumes {
+    fn default() -> Volumes {
+        Volumes { music: 100, building: 100, effects: 100, speech: 100 }
+    }
+}
+
+impl Volumes {
+    pub fn gain(&self, kind: Kind) -> f32 {
+        let pct = match kind {
+            Kind::Effect => self.effects,
+            Kind::Speech => self.speech,
+            Kind::Building => self.building,
+        };
+        pct as f32 / 100.0
+    }
+
+    /// The four sliders in menu order.
+    pub fn slot(&mut self, i: usize) -> &mut u8 {
+        match i {
+            0 => &mut self.music,
+            1 => &mut self.building,
+            2 => &mut self.effects,
+            _ => &mut self.speech,
+        }
+    }
+
+    pub fn parse(text: &str) -> Volumes {
+        let mut v = Volumes::default();
+        for line in text.lines() {
+            let Some((k, val)) = line.split_once('=') else { continue };
+            let Ok(n) = val.trim().parse::<u8>() else { continue };
+            match k.trim() {
+                "music" => v.music = n.min(100),
+                "building" => v.building = n.min(100),
+                "effects" => v.effects = n.min(100),
+                "speech" => v.speech = n.min(100),
+                _ => {}
+            }
+        }
+        v
+    }
+
+    pub fn to_text(self) -> String {
+        format!("music={}\nbuilding={}\neffects={}\nspeech={}\n", self.music, self.building, self.effects, self.speech)
+    }
+}
+
 #[derive(Clone)]
 pub struct Voice {
     pub data: Vec<u8>,
@@ -20,13 +101,14 @@ pub struct Voice {
     pub freq: Option<u32>,
     pub playing: bool,
     pub looping: bool,
+    pub kind: Kind,
     /// Play position in source frames.
     pub pos: f64,
 }
 
 impl Voice {
     pub fn new(size: usize) -> Voice {
-        Voice { data: vec![0; size], channels: 1, rate: 22050, bits: 8, volume: 0, pan: 0, freq: None, playing: false, looping: false, pos: 0.0 }
+        Voice { data: vec![0; size], channels: 1, rate: 22050, bits: 8, volume: 0, pan: 0, freq: None, playing: false, looping: false, kind: Kind::Effect, pos: 0.0 }
     }
 
     fn frame_bytes(&self) -> usize {
@@ -64,6 +146,7 @@ pub struct Mixer {
     pub voices: HashMap<u32, Voice>,
     pub cd: Option<Cd>,
     pub cd_volume: f32,
+    pub volumes: Volumes,
 }
 
 impl Mixer {
@@ -73,7 +156,7 @@ impl Mixer {
         let mut acc = vec![0f32; frames * 2];
         for v in self.voices.values_mut().filter(|v| v.playing && v.frames() > 0) {
             let step = v.freq.unwrap_or(v.rate) as f64 / OUT_RATE as f64;
-            let gain = db_gain(v.volume);
+            let gain = db_gain(v.volume) * self.volumes.gain(v.kind);
             let (gl, gr) = if v.pan > 0 { (db_gain(-v.pan) * gain, gain) } else { (gain, db_gain(v.pan) * gain) };
             let n = v.frames();
             for i in 0..frames {
@@ -95,7 +178,7 @@ impl Mixer {
             }
         }
         if let Some(cd) = self.cd.as_mut() {
-            let gain = if self.cd_volume > 0.0 { self.cd_volume } else { 1.0 };
+            let gain = if self.cd_volume > 0.0 { self.cd_volume } else { 1.0 } * self.volumes.music as f32 / 100.0;
             for i in 0..frames {
                 if cd.pos + 4 > cd.data.len() {
                     self.cd = None;
@@ -246,6 +329,53 @@ mod tests {
         assert_eq!(out[..4], [8191, -8191, 8191, -8191]);
         assert_eq!(out[4..], [0, 0]);
         assert!(mx.cd.is_none());
+    }
+
+    #[test]
+    fn volumes_scale_each_kind_and_the_cd() {
+        let mut mx = Mixer { volumes: Volumes { music: 50, building: 0, effects: 100, speech: 25 }, ..Default::default() };
+        for (id, kind) in [(1, Kind::Building), (2, Kind::Speech), (3, Kind::Effect)] {
+            let mut v = voice16(&[16384; 4], 44100);
+            v.playing = true;
+            v.kind = kind;
+            mx.voices.insert(id, v);
+            let mut out = [0i16; 2];
+            mx.mix(&mut out);
+            let want = match kind {
+                Kind::Building => 0,
+                Kind::Speech => 4095,
+                Kind::Effect => 16383,
+            };
+            assert_eq!(out[0], want, "{kind:?}");
+            mx.voices.clear();
+        }
+        let data: Vec<u8> = [16384i16, 16384].iter().flat_map(|s| s.to_le_bytes()).collect();
+        mx.cd = Some(Cd { data: Arc::new(data), pos: 0 });
+        let mut out = [0i16; 2];
+        mx.mix(&mut out);
+        assert_eq!(out, [8191, 8191]);
+    }
+
+    #[test]
+    fn volumes_round_trip_through_text_and_ignore_junk() {
+        let v = Volumes { music: 10, building: 0, effects: 55, speech: 100 };
+        assert_eq!(Volumes::parse(&v.to_text()), v);
+        assert_eq!(Volumes::parse(""), Volumes::default());
+        assert_eq!(Volumes::parse("music=500\nspeech=abc\nnonsense\neffects = 7\nbuilding=-3"), Volumes { music: 100, building: 100, effects: 7, speech: 100 });
+        let mut v = Volumes::default();
+        for (i, n) in [(0, 1), (1, 2), (2, 3), (3, 4)] {
+            *v.slot(i) = n;
+        }
+        assert_eq!(v, Volumes { music: 1, building: 2, effects: 3, speech: 4 });
+        assert_eq!(v.gain(Kind::Building), 0.02);
+    }
+
+    #[test]
+    fn banks_map_to_kinds() {
+        assert_eq!(Kind::of_bank(BANK_P), Kind::Speech);
+        assert_eq!(Kind::of_bank(BANK_B), Kind::Building);
+        assert_eq!(Kind::of_bank(0x521fc8), Kind::Effect);
+        assert_eq!(Kind::of_bank(0), Kind::Effect);
     }
 
     #[test]

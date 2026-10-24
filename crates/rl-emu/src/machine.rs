@@ -21,6 +21,9 @@ pub const STUB_SIZE: u32 = 0x10000;
 pub const TRAMP: u32 = STUB_BASE;
 const STACK_TOP: u32 = 0x0f10_0000;
 const STACK_SIZE: u32 = 0x0010_0000;
+/// Guest addresses in the original code: where a sound is loaded into a buffer, and where one is requested.
+const SOUND_LOAD: u32 = 0x48aad4;
+const SOUND_REQUEST: u32 = 0x48aa79;
 pub const HEAP_BASE: u32 = 0x1000_0000;
 const HEAP_SIZE: u32 = 0x2000_0000;
 
@@ -93,6 +96,8 @@ pub struct State {
     pub video_open: Option<crate::video::Avi>,
     pub video: Option<crate::video::Player>,
     pub mixer: crate::audio::Shared,
+    /// Bank of the sound the game is about to buffer (set by the hook in [`Machine::new`]).
+    pub sound_kind: crate::audio::Kind,
     /// Track files for CD audio (`trackNN.raw` in the disc root).
     pub cd_tracks: HashMap<u32, std::sync::Arc<Vec<u8>>>,
     pub cd_format_tmsf: bool,
@@ -143,6 +148,7 @@ impl State {
             video_open: None,
             video: None,
             mixer: Default::default(),
+            sound_kind: Default::default(),
             cd_tracks: HashMap::new(),
             cd_format_tmsf: false,
             finds: HashMap::new(),
@@ -381,6 +387,19 @@ impl Machine {
 
         uc.add_code_hook(STUB_BASE as u64, (STUB_BASE + STUB_SIZE) as u64, |uc, addr, _| on_stub(uc, addr as u32))
             .map_err(|e| format!("hook: {e:?}"))?;
+        // The game's sound loader (`FUN_0048aad4`, EDX = the bank) runs right before it creates the buffer.
+        uc.add_code_hook(SOUND_LOAD as u64, SOUND_LOAD as u64, |uc, _, _| {
+            let kind = crate::audio::Kind::of_bank(reg(uc, RegisterX86::EDX));
+            uc.get_data_mut().sound_kind = kind;
+        })
+        .map_err(|e| format!("sound hook: {e:?}"))?;
+        // RL_AUDIO_LOG also logs each sound request (`FUN_0048aa79`: EAX = bank letter, EDX = type << 16 | class << 8).
+        if std::env::var_os("RL_AUDIO_LOG").is_some() {
+            uc.add_code_hook(SOUND_REQUEST as u64, SOUND_REQUEST as u64, |uc, _, _| {
+                eprintln!("audio: request bank {} key {:#x}", reg(uc, RegisterX86::EAX) as u8 as char, reg(uc, RegisterX86::EDX));
+            })
+            .map_err(|e| format!("sound hook: {e:?}"))?;
+        }
         // RL_TRACE=<hex addr>[,<hex addr>...] logs the registers each time the guest reaches an address.
         if let Ok(spec) = std::env::var("RL_TRACE") {
             for a in spec.split(',').filter_map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()) {

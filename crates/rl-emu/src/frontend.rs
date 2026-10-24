@@ -1,6 +1,6 @@
 //! SDL2 window: presents the guest's primary surface and feeds input to the guest.
 
-use crate::{com, machine::*, overlay};
+use crate::{com, machine::*, options::Options, overlay};
 use std::time::Instant;
 use sdl2::{
     event::{Event, WindowEvent},
@@ -75,6 +75,9 @@ pub struct Frontend {
     /// The frame looks like the in-game view (the game draws its own pointer on the map only).
     ingame: bool,
     cursor_drawn: Option<(i32, i32)>,
+    /// The volume options (F10), when open.
+    options: Option<Options>,
+    mixer: crate::audio::Shared,
 }
 
 fn vk_of(k: Keycode) -> Option<u8> {
@@ -135,14 +138,14 @@ impl Frontend {
             canvas.window_mut().set_grab(true);
         }
         video.text_input().start();
-        let audio_dev = crate::audio::open(&sdl, mixer);
+        let audio_dev = crate::audio::open(&sdl, mixer.clone());
         if audio_dev.is_none() {
             eprintln!("warning: no audio device");
         }
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None, options: None, mixer })
     }
 
     /// Handles window events; returns false when the user asked to quit.
@@ -193,6 +196,19 @@ impl Frontend {
                 if !matches!(e, Event::Quit { .. }) {
                     continue;
                 }
+            }
+            // The volume options take all input while open (the game keeps running underneath).
+            if self.options.is_some() {
+                if !self.options_event(uc, &e) {
+                    continue;
+                }
+                if !matches!(e, Event::Quit { .. }) {
+                    continue;
+                }
+            }
+            if let Event::KeyDown { keycode: Some(Keycode::F10), repeat: false, .. } = e {
+                self.options = Some(Options::default());
+                continue;
             }
             if let Event::KeyDown { keycode: Some(Keycode::F12), repeat: false, .. } = e {
                 self.console = true;
@@ -305,6 +321,51 @@ impl Frontend {
         true
     }
 
+    /// Feeds one event to the open options menu. Returns false once it has handled the event.
+    fn options_event(&mut self, uc: &mut Uc, e: &Event) -> bool {
+        let Some(o) = self.options.as_mut() else { return true };
+        let (w, h) = (self.tex_size.0 as usize, self.tex_size.1 as usize);
+        let mut vol = self.mixer.lock().map(|m| m.volumes).unwrap_or_default();
+        let before = vol;
+        let mut close = false;
+        match *e {
+            Event::KeyDown { keycode: Some(k), .. } => match k {
+                Keycode::Up => o.select(-1),
+                Keycode::Down | Keycode::Tab => o.select(1),
+                Keycode::Left => o.adjust(&mut vol, -1),
+                Keycode::Right => o.adjust(&mut vol, 1),
+                Keycode::Home => *vol.slot(o.sel) = 0,
+                Keycode::End => *vol.slot(o.sel) = 100,
+                Keycode::Escape | Keycode::F10 | Keycode::Return | Keycode::KpEnter => close = true,
+                _ => {}
+            },
+            Event::MouseButtonDown { mouse_btn: MouseButton::Left, x, y, .. } => {
+                o.pointer(&mut vol, w, h, x, y, true);
+            }
+            Event::MouseMotion { x, y, .. } => {
+                uc.get_data_mut().cursor = (x, y);
+                if o.drag.is_some() {
+                    o.pointer(&mut vol, w, h, x, y, false);
+                }
+            }
+            Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => o.drag = None,
+            Event::Quit { .. } => return true,
+            _ => {}
+        }
+        if vol != before {
+            if let Ok(mut m) = self.mixer.lock() {
+                m.volumes = vol;
+            }
+        }
+        if close {
+            self.options = None;
+            let _ = std::fs::write(uc.get_data().vfs.overlay.join(crate::options::FILE), vol.to_text());
+            // The next frame must redraw without the panel.
+            self.was_overlay = true;
+        }
+        false
+    }
+
     /// The game draws its pointer only over the map; elsewhere (menus, bottom bar) we draw one.
     fn host_cursor(&self, uc: &Uc) -> Option<(i32, i32)> {
         let (x, y) = uc.get_data().cursor;
@@ -328,10 +389,10 @@ impl Frontend {
         }
         let n = uc.get_data().com.frames_presented;
         let toast = uc.get_data().ui.toast.as_ref().filter(|(_, t)| t.elapsed().as_secs() < 8).map(|(s, _)| s.clone());
-        let overlay_on = self.prompt.is_some() || toast.is_some();
+        let overlay_on = self.prompt.is_some() || self.options.is_some() || toast.is_some();
         let same_toast = self.toast_drawn == toast;
-        let hc = self.host_cursor(uc);
-        if n == self.shown && same_toast && self.prompt.is_none() && overlay_on == self.was_overlay && hc == self.cursor_drawn {
+        let hc = if self.options.is_some() { Some(uc.get_data().cursor) } else { self.host_cursor(uc) };
+        if n == self.shown && same_toast && self.prompt.is_none() && self.options.is_none() && overlay_on == self.was_overlay && hc == self.cursor_drawn {
             return;
         }
         self.cursor_drawn = hc;
@@ -365,6 +426,10 @@ impl Frontend {
             overlay::fill_rect(&mut rgba, stride, bx, by + 68, bw, 2, [220, 170, 90, 255]);
             overlay::draw_text(&mut rgba, stride, bx + 12, by + 12, label, 2, [230, 200, 140, 255]);
             overlay::draw_text(&mut rgba, stride, bx + 12, by + 40, &line, 3, [255, 255, 255, 255]);
+        }
+        if let Some(o) = &self.options {
+            let mut vol = self.mixer.lock().map(|m| m.volumes).unwrap_or_default();
+            o.draw(&mut rgba, stride, h as usize, &mut vol);
         }
         if let Some((cx, cy)) = hc {
             overlay::draw_arrow(&mut rgba, w as usize, h as usize, cx, cy);
@@ -535,6 +600,7 @@ mod tests {
         std::env::set_var("SDL_VIDEODRIVER", "dummy");
         std::env::set_var("SDL_AUDIODRIVER", "dummy");
         let mixer: crate::audio::Shared = Default::default();
+        let mx = mixer.clone();
         let mut fe = match Frontend::new(1, mixer) {
             Ok(f) => f,
             Err(e) => {
@@ -630,6 +696,50 @@ mod tests {
         fe.pump(&mut uc);
         assert!(fe.prompt.is_none());
         assert_eq!(uc.get_data().ui.submitted_host.as_deref(), Some("10.0.0.5"));
+
+        // F10 opens the volume options: keys and mouse adjust the sliders instead of reaching the game.
+        let vols = || mx.lock().unwrap().volumes;
+        msgs(&mut uc);
+        ev.push_event(key(Keycode::F10, true, none)).unwrap();
+        ev.push_event(key(Keycode::Left, true, none)).unwrap();
+        ev.push_event(key(Keycode::Down, true, none)).unwrap();
+        for _ in 0..3 {
+            ev.push_event(key(Keycode::Left, true, none)).unwrap();
+        }
+        ev.push_event(key(Keycode::Down, true, none)).unwrap();
+        ev.push_event(key(Keycode::End, true, none)).unwrap();
+        ev.push_event(key(Keycode::Down, true, none)).unwrap();
+        ev.push_event(key(Keycode::Home, true, none)).unwrap();
+        ev.push_event(mouse(Some(true), MouseButton::Right, 400, 300, 1)).unwrap();
+        fe.pump(&mut uc);
+        assert!(fe.options.is_some());
+        assert_eq!(vols(), crate::audio::Volumes { music: 95, building: 85, effects: 100, speech: 0 });
+        assert!(msgs(&mut uc).is_empty(), "nothing leaked to the game");
+        assert!(!uc.get_data().keys[3], "right button did not reach the game");
+        // Dragging with the mouse: press on the first bar's middle, move, release.
+        let bar = |row: usize| (crate::options::bar_x(800), crate::options::row_y(800, 600, row) as i32 + 4);
+        let (bx, by) = bar(0);
+        ev.push_event(mouse(Some(true), MouseButton::Left, bx as i32 + 100, by, 1)).unwrap();
+        ev.push_event(mouse(None, MouseButton::Left, bx as i32 + 40, by + 90, 0)).unwrap();
+        ev.push_event(mouse(Some(false), MouseButton::Left, bx as i32 + 40, by + 90, 1)).unwrap();
+        ev.push_event(mouse(None, MouseButton::Left, bx as i32 + 190, by, 0)).unwrap();
+        fe.pump(&mut uc);
+        assert_eq!(vols().music, 20, "released drag stops following the mouse");
+        assert_eq!(uc.get_data().cursor, (bx as i32 + 190, by));
+        // Drawn over a frame, with the pointer, then closed with Escape: the volumes are saved.
+        let dir = std::env::temp_dir().join(format!("rl-options-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        uc.get_data_mut().vfs.overlay = dir.clone();
+        ev.push_event(key(Keycode::Escape, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(fe.options.is_none());
+        let saved = std::fs::read_to_string(dir.join(crate::options::FILE)).unwrap();
+        assert_eq!(crate::audio::Volumes::parse(&saved), vols());
+        std::fs::remove_dir_all(&dir).ok();
+        ev.push_event(key(Keycode::F10, true, none)).unwrap();
+        ev.push_event(key(Keycode::F10, true, none)).unwrap();
+        fe.pump(&mut uc);
+        assert!(fe.options.is_none(), "F10 toggles it closed again");
 
         // Drawing: a toast and a prompt over a presented frame, then a movie frame.
         let mem = uc.get_data_mut().alloc(640 * 480);

@@ -5,6 +5,7 @@ mod com;
 mod debug;
 mod dplay;
 mod net;
+mod options;
 mod overlay;
 mod upnp;
 mod frontend;
@@ -194,6 +195,9 @@ fn main() -> ExitCode {
     };
     if let Ok(h) = std::fs::read_to_string(userdir().join("lasthost.txt")) {
         m.uc.get_data_mut().ui.last_host = h.trim().to_string();
+    }
+    if let Ok(t) = std::fs::read_to_string(userdir().join(options::FILE)) {
+        m.uc.get_data().mixer.lock().unwrap().volumes = audio::Volumes::parse(&t);
     }
     // Headless: RL_SHOT=<out.png> RL_SECS=<n> renders the primary surface after n seconds (no window).
     let secs: f64 = env::var("RL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::INFINITY);

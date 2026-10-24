@@ -50,6 +50,12 @@ until the next frame deadline (`RL_FPS`, default 30), which is what fixes the un
   polling, close). Escape skips it. The host decodes Cinepak + MS ADPCM itself (`video.rs`).
 * CD music: MCI strings (`open ... cdaudio`, `play cdrud from N`, `status ... length track N`) are
   served from `trackNN.raw` in the disc root.
+* Sound volumes (F10, `options.rs`): the game has three sound banks in `INSTALHD\SOUND`: `P` (unit speech), `B`
+  (building noises, keyed by building type; the builder's hammer is among them) and `A` (the rest). Its sound loader
+  (`0x48aad4`, EDX = bank struct: `A` `0x521fc8`, `B` `0x521fe4`, `P` `0x522000`) runs right before it creates the
+  DirectSound buffer, so a code hook tags the next buffer with its bank (`audio::Kind`) and the mixer scales each kind.
+  The CD music has its own volume. `RL_AUDIO_LOG=1` also logs every request (`0x48aa79`: EAX = bank letter,
+  EDX = type << 16 | class << 8), which is how to tell the sounds of one bank apart.
 
 ## Multiplayer
 
