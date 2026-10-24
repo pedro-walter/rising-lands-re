@@ -207,7 +207,7 @@ impl sdl2::audio::AudioCallback for Output {
         match self.0.lock() {
             Ok(mut m) => {
                 m.mix(out);
-                if std::env::var_os("RL_AUDIO_LOG").is_some() {
+                if std::env::var("RL_AUDIO_LOG").is_ok_and(|v| v == "2") {
                     let peak = out.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
                     let playing = m.voices.values().filter(|v| v.playing).count();
                     eprintln!("audio: peak {peak} voices {playing} cd {}", m.cd.is_some());

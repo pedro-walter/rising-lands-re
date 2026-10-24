@@ -393,10 +393,14 @@ impl Machine {
             uc.get_data_mut().sound_kind = kind;
         })
         .map_err(|e| format!("sound hook: {e:?}"))?;
-        // RL_AUDIO_LOG also logs each sound request (`FUN_0048aa79`: EAX = bank letter, EDX = type << 16 | class << 8).
+        // RL_AUDIO_LOG also logs each new kind of sound request, once (`FUN_0048aa79`: EAX = bank letter, EDX = type << 16 | class << 8).
         if std::env::var_os("RL_AUDIO_LOG").is_some() {
-            uc.add_code_hook(SOUND_REQUEST as u64, SOUND_REQUEST as u64, |uc, _, _| {
-                eprintln!("audio: request bank {} key {:#x}", reg(uc, RegisterX86::EAX) as u8 as char, reg(uc, RegisterX86::EDX));
+            let mut seen = std::collections::HashSet::new();
+            uc.add_code_hook(SOUND_REQUEST as u64, SOUND_REQUEST as u64, move |uc, _, _| {
+                let (bank, key) = (reg(uc, RegisterX86::EAX) as u8 as char, reg(uc, RegisterX86::EDX));
+                if seen.insert((bank, key)) {
+                    eprintln!("audio: new sound request bank {bank} type {} class {:#x} (key {key:#x})", key >> 16, key >> 8 & 0xff);
+                }
             })
             .map_err(|e| format!("sound hook: {e:?}"))?;
         }
