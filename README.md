@@ -39,7 +39,7 @@ cargo run --release -p rl-emu -- --mission 5    # same, then jumps to mission 5 
 ```
 
 Keys: the game's own; `Alt+Enter` toggles fullscreen, `F11` switches 800x600 / 640x480 (the
-game's own key), `F1`-`F4` set the game speed to 1x / 1.5x / 2x / 3x (the original used them to skip frames), `F6` / `F5` raise / lower it by 1x, `F12` opens the debug console (see docs/DEBUG.md), `Ctrl +` / `Ctrl -` change the base frame rate (steps of 5), `Esc` skips a
+game's own key), `F1`-`F3` set the game speed to 1x / 1.5x / 2x (the original used F1-F4 to skip frames), `F12` opens the debug console (see docs/DEBUG.md), `Ctrl +` / `Ctrl -` change the base frame rate (steps of 5), `Esc` skips a
 movie. The first menu click plays the intro movie; press `Esc`.
 
 ## Multiplayer

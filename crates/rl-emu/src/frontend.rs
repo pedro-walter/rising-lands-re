@@ -243,29 +243,22 @@ impl Frontend {
                     st.ui.toast(format!("VELOCIDADE: {fps} QUADROS POR SEGUNDO"));
                     self.was_overlay = true;
                 }
-                // F1-F4: 1x, 1.5x, 2x, 3x (F5/F6 step by 1x). The original skipped frames to go faster; at the
-                // fixed frame rate that only degrades the picture, so scale the pace instead.
-                Event::KeyDown { keycode: Some(k @ (Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4)), repeat: false, .. } => {
+                // F1-F3: 1x, 1.5x, 2x. The original skipped frames to go faster; here the pace scales instead.
+                // Past 2x the display's vsync caps what the host can show, so there is nothing above.
+                // F4 is the game's own frame-skip toggle; it is swallowed.
+                Event::KeyDown { keycode: Some(k @ (Keycode::F1 | Keycode::F2 | Keycode::F3)), repeat: false, .. } => {
                     let (speed, label) = match k {
                         Keycode::F1 => (1.0, "1X"),
                         Keycode::F2 => (1.5, "1,5X"),
-                        Keycode::F3 => (2.0, "2X"),
-                        _ => (3.0, "3X"),
+                        _ => (2.0, "2X"),
                     };
                     let st = uc.get_data_mut();
                     st.speed = speed;
                     st.ui.toast(format!("VELOCIDADE: {label}"));
                     self.was_overlay = true;
                 }
-                // F6/F5: raise or lower the speed by 1x (between 1x and 10x).
-                Event::KeyDown { keycode: Some(k @ (Keycode::F5 | Keycode::F6)), repeat: false, .. } => {
-                    let st = uc.get_data_mut();
-                    st.speed = (st.speed + if k == Keycode::F6 { 1.0 } else { -1.0 }).clamp(1.0, 10.0);
-                    let label = format!("{}", st.speed).replace('.', ",");
-                    st.ui.toast(format!("VELOCIDADE: {label}X"));
-                    self.was_overlay = true;
-                }
-                Event::KeyUp { keycode: Some(Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4 | Keycode::F5 | Keycode::F6), .. } => {}
+                Event::KeyDown { keycode: Some(Keycode::F4), .. } => {}
+                Event::KeyUp { keycode: Some(Keycode::F1 | Keycode::F2 | Keycode::F3 | Keycode::F4), .. } => {}
                 Event::KeyDown { keycode: Some(Keycode::Return), keymod, repeat: false, .. } if keymod.intersects(sdl2::keyboard::Mod::LALTMOD | sdl2::keyboard::Mod::RALTMOD) => {
                     let w = self.canvas.window_mut();
                     let full = w.fullscreen_state() != sdl2::video::FullscreenType::Off;
@@ -587,14 +580,6 @@ mod tests {
         assert!(fe.pump(&mut uc));
         assert_eq!(uc.get_data().speed, 2.0);
         assert!(uc.get_data().ui.toast.as_ref().is_some_and(|t| t.0.contains("2X")));
-        ev.push_event(key(Keycode::F6, true, none)).unwrap();
-        fe.pump(&mut uc);
-        assert_eq!(uc.get_data().speed, 3.0);
-        ev.push_event(key(Keycode::F5, true, none)).unwrap();
-        ev.push_event(key(Keycode::F5, true, none)).unwrap();
-        ev.push_event(key(Keycode::F5, true, none)).unwrap();
-        fe.pump(&mut uc);
-        assert_eq!(uc.get_data().speed, 1.0, "F5 stops at 1x");
         ev.push_event(key(Keycode::F1, true, none)).unwrap();
         ev.push_event(key(Keycode::KpPlus, true, Mod::LCTRLMOD)).unwrap();
         fe.pump(&mut uc);
