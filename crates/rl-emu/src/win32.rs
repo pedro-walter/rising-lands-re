@@ -442,7 +442,7 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
             let cls = rd_cstr(uc, a[1]).to_ascii_lowercase();
             let proc_ = uc.get_data().classes.get(&cls).copied().unwrap_or(0);
             let hwnd = 0x1000 + uc.get_data().windows.len() as u32 * 4;
-            uc.get_data_mut().windows.push(Window { class: cls, proc_ });
+            uc.get_data_mut().windows.push(Window { proc_ });
             if proc_ != 0 {
                 // CREATESTRUCT
                 let cs = uc.get_data_mut().alloc(48);
@@ -833,7 +833,7 @@ mod tests {
 
     fn imp(uc: &mut Uc, name: &str, a: &[u32]) -> Option<u32> {
         let idx = uc.get_data().stubs.len();
-        uc.get_data_mut().stubs.push(Stub { name: name.into(), dll: "test.dll".into() });
+        uc.get_data_mut().stubs.push(Stub { name: name.into() });
         let mut args = [0u32; 14];
         args[..a.len()].copy_from_slice(a);
         call_import_inner(uc, idx, 0x7f00_0200, &args)
@@ -1123,9 +1123,9 @@ mod tests {
     fn import_dispatch_yields_to_the_host_in_the_message_pump() {
         let mut e = env("yield");
         let uc = &mut e.uc;
-        uc.get_data_mut().stubs.push(Stub { name: "GetMessageA".into(), dll: "user32.dll".into() });
-        uc.get_data_mut().stubs.push(Stub { name: "GetAsyncKeyState".into(), dll: "user32.dll".into() });
-        uc.get_data_mut().stubs.push(Stub { name: "GetVersion".into(), dll: "kernel32.dll".into() });
+        uc.get_data_mut().stubs.push(Stub { name: "GetMessageA".into() });
+        uc.get_data_mut().stubs.push(Stub { name: "GetAsyncKeyState".into() });
+        uc.get_data_mut().stubs.push(Stub { name: "GetVersion".into() });
         let msg = buf(uc, 28);
         let mut a = [0u32; 14];
         a[0] = msg;

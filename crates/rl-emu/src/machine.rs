@@ -28,7 +28,6 @@ pub type Uc<'a> = Unicorn<'a, State>;
 
 pub struct Stub {
     pub name: String,
-    pub dll: String,
 }
 
 pub enum Action {
@@ -63,7 +62,6 @@ pub struct Msg {
 }
 
 pub struct Window {
-    pub class: String,
     pub proc_: u32,
 }
 
@@ -247,6 +245,7 @@ pub fn wr32(uc: &mut Uc, addr: u32, v: u32) {
     uc.mem_write(addr as u64, &v.to_le_bytes()).unwrap_or_else(|e| panic!("write32 {addr:#x}: {e:?}"));
 }
 
+#[cfg(test)]
 pub fn wr16(uc: &mut Uc, addr: u32, v: u16) {
     uc.mem_write(addr as u64, &v.to_le_bytes()).unwrap_or_else(|e| panic!("write16 {addr:#x}: {e:?}"));
 }
@@ -350,7 +349,7 @@ impl Machine {
             wr_bytes(&mut uc, next, &code);
             wr32(&mut uc, imp.slot, next);
             let idx = uc.get_data().stubs.len();
-            uc.get_data_mut().stubs.push(Stub { name: imp.name.clone(), dll: imp.dll.clone() });
+            uc.get_data_mut().stubs.push(Stub { name: imp.name.clone() });
             assert_eq!(idx as u32 * 16 + STUB_BASE + 16, next);
             next += 16;
         }

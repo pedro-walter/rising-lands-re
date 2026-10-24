@@ -248,6 +248,7 @@ impl Net {
         });
     }
 
+    #[cfg(test)]
     pub fn stop_discovery(&self) {
         self.core.lock().unwrap().discovering = false;
     }

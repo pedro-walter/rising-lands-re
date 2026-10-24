@@ -21,7 +21,6 @@ pub struct Dp {
     pub net: Net,
     pub msgs: VecDeque<(u32, u32, Vec<u8>)>,
     pub local_player: Option<u32>,
-    pub joined_players: usize,
     /// The public address was already announced to the user.
     pub announced_public: bool,
     /// Already asked the user for a host address for this join screen.
@@ -30,7 +29,7 @@ pub struct Dp {
 
 impl Dp {
     pub fn new() -> Dp {
-        Dp { net: Net::new(), msgs: VecDeque::new(), local_player: None, joined_players: 0, asked_host: false, announced_public: false }
+        Dp { net: Net::new(), msgs: VecDeque::new(), local_player: None, asked_host: false, announced_public: false }
     }
 
     /// Moves network events into the receive queue as DirectPlay messages.

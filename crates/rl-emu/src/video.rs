@@ -325,13 +325,12 @@ pub struct Player {
     pub next: usize,
     pub finished: bool,
     pub dirty: bool,
-    pub voice: Option<u32>,
 }
 
 impl Player {
     pub fn new(avi: Avi) -> Player {
         let dec = Cinepak::new(avi.width, avi.height);
-        Player { avi, dec, start: Instant::now(), next: 0, finished: false, dirty: false, voice: None }
+        Player { avi, dec, start: Instant::now(), next: 0, finished: false, dirty: false }
     }
 
     /// Decodes frames that are due; call regularly.

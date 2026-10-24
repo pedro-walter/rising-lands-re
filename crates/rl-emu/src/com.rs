@@ -17,7 +17,6 @@ pub struct Com {
     pub display: (u32, u32),
     pub primary: Option<u32>,
     pub frames_presented: u64,
-    pub log: bool,
     pub dplay: Option<crate::dplay::Dp>,
 }
 
