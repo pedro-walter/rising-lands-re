@@ -1,12 +1,11 @@
-//! The options menu (F10): one volume slider each for the music, the building noises (the
-//! builder's hammer), the sound effects and the unit voices. Drawn over the game with the
+//! The options menu (F10): one volume slider each for the music, the builder's hammer, the sound effects and the unit voices. Drawn over the game with the
 //! bitmap font in `overlay`; the volumes themselves live in `audio::Volumes`.
 
 use crate::{audio::Volumes, overlay};
 
 /// File in the user directory holding the volumes.
 pub const FILE: &str = "options.txt";
-pub const LABELS: [&str; 4] = ["MUSICA", "CONSTRUCAO (MARTELO)", "EFEITOS SONOROS", "VOZES"];
+pub const LABELS: [&str; 4] = ["MUSICA", "MARTELO DO CONSTRUTOR", "EFEITOS SONOROS", "VOZES"];
 const TITLE: &str = "OPCOES DE SOM";
 const HELP: &str = "CIMA/BAIXO ESCOLHEM - ESQ/DIR AJUSTAM - ESC FECHA";
 const STEP: i32 = 5;
@@ -125,7 +124,7 @@ mod tests {
         assert_eq!(v.music, 0);
         o.sel = 1;
         o.adjust(&mut v, -1);
-        assert_eq!(v.building, 95);
+        assert_eq!(v.hammer, 95);
         assert_eq!(v.effects, 100);
     }
 
@@ -137,12 +136,12 @@ mod tests {
         let mut v = Volumes::default();
         let y1 = bar_y(&l, 1) as i32 + 5;
         assert!(o.pointer(&mut v, w, h, (l.bar_x + BAR_W / 2) as i32, y1, true));
-        assert_eq!((o.sel, v.building), (1, 50));
+        assert_eq!((o.sel, v.hammer), (1, 50));
         // Dragging far below the bar still moves row 1, and past the ends clamps.
         assert!(o.pointer(&mut v, w, h, l.bar_x as i32 - 80, y1 + 200, false));
-        assert_eq!(v.building, 0);
+        assert_eq!(v.hammer, 0);
         assert!(o.pointer(&mut v, w, h, (l.bar_x + BAR_W + 40) as i32, y1, false));
-        assert_eq!(v.building, 100);
+        assert_eq!(v.hammer, 100);
         o.drag = None;
         assert!(!o.pointer(&mut v, w, h, 5, 5, true), "outside every bar");
         assert!(!o.pointer(&mut v, w, h, 5, 5, false), "no drag in progress");
@@ -153,7 +152,7 @@ mod tests {
     fn draws_a_panel_inside_the_frame_with_the_bars_filled_to_the_volume() {
         let (w, h) = (800usize, 600usize);
         let mut buf = vec![0u8; w * h * 4];
-        let mut v = Volumes { music: 100, building: 0, effects: 50, speech: 100 };
+        let mut v = Volumes { music: 100, hammer: 0, effects: 50, speech: 100 };
         Options { sel: 2, drag: None }.draw(&mut buf, w, h, &mut v);
         let l = layout(w, h);
         let px = |x: usize, y: usize| -> [u8; 4] { buf[(y * w + x) * 4..][..4].try_into().unwrap() };

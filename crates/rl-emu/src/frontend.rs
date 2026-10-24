@@ -713,7 +713,7 @@ mod tests {
         ev.push_event(mouse(Some(true), MouseButton::Right, 400, 300, 1)).unwrap();
         fe.pump(&mut uc);
         assert!(fe.options.is_some());
-        assert_eq!(vols(), crate::audio::Volumes { music: 95, building: 85, effects: 100, speech: 0 });
+        assert_eq!(vols(), crate::audio::Volumes { music: 95, hammer: 85, effects: 100, speech: 0 });
         assert!(msgs(&mut uc).is_empty(), "nothing leaked to the game");
         assert!(!uc.get_data().keys[3], "right button did not reach the game");
         // Dragging with the mouse: press on the first bar's middle, move, release.

@@ -387,9 +387,11 @@ impl Machine {
 
         uc.add_code_hook(STUB_BASE as u64, (STUB_BASE + STUB_SIZE) as u64, |uc, addr, _| on_stub(uc, addr as u32))
             .map_err(|e| format!("hook: {e:?}"))?;
-        // The game's sound loader (`FUN_0048aad4`, EDX = the bank) runs right before it creates the buffer.
+        // The game's sound loader (`FUN_0048aad4`, EDX = the bank, EBX = the channel record that starts with the
+        // request key) runs right before it creates the buffer.
         uc.add_code_hook(SOUND_LOAD as u64, SOUND_LOAD as u64, |uc, _, _| {
-            let kind = crate::audio::Kind::of_bank(reg(uc, RegisterX86::EDX));
+            let key = rd32(uc, reg(uc, RegisterX86::EBX));
+            let kind = crate::audio::Kind::of_sound(reg(uc, RegisterX86::EDX), key);
             uc.get_data_mut().sound_kind = kind;
         })
         .map_err(|e| format!("sound hook: {e:?}"))?;

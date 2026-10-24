@@ -50,12 +50,13 @@ until the next frame deadline (`RL_FPS`, default 30), which is what fixes the un
   polling, close). Escape skips it. The host decodes Cinepak + MS ADPCM itself (`video.rs`).
 * CD music: MCI strings (`open ... cdaudio`, `play cdrud from N`, `status ... length track N`) are
   served from `trackNN.raw` in the disc root.
-* Sound volumes (F10, `options.rs`): the game has three sound banks in `INSTALHD\SOUND`: `P` (unit speech), `B`
-  (building noises, keyed by building type; the builder's hammer is among them) and `A` (the rest). Its sound loader
-  (`0x48aad4`, EDX = bank struct: `A` `0x521fc8`, `B` `0x521fe4`, `P` `0x522000`) runs right before it creates the
-  DirectSound buffer, so a code hook tags the next buffer with its bank (`audio::Kind`) and the mixer scales each kind.
-  The CD music has its own volume. `RL_AUDIO_LOG=1` also logs each new request (once per bank and key, on stderr; `RL_AUDIO_LOG=2` adds the per-buffer mixer lines) (`0x48aa79`: EAX = bank letter,
-  EDX = type << 16 | class << 8), which is how to tell the sounds of one bank apart.
+* Sound volumes (F10, `options.rs`): the game has three sound banks in `INSTALHD\SOUND`: `P` (unit sounds, keyed by
+  unit type and class), `B` (building noises) and `A` (the rest). Its sound loader (`0x48aad4`, EDX = bank struct, `P` at
+  `0x522000`, EBX = the channel record, which starts with the request key `type << 16 | class << 8`) runs right before it
+  creates the DirectSound buffer, so a code hook tags the next buffer (`audio::Kind`) and the mixer scales each kind.
+  Speech = bank `P`; the builder's hammer = `P` type 7 class `0x25` (found with `RL_AUDIO_LOG`); everything else is
+  an effect. The CD music has its own volume. `RL_AUDIO_LOG=1` logs each new request (once per bank and key, on
+  stderr; `RL_AUDIO_LOG=2` adds the per-buffer mixer lines), which is how to tell more sounds apart.
 
 ## Multiplayer
 

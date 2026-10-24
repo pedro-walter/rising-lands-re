@@ -14,19 +14,20 @@ pub enum Kind {
     Effect,
     /// Unit voices (sound bank `P`).
     Speech,
-    /// Building noises, the builder's hammer among them (sound bank `B`).
-    Building,
+    /// The builder's hammer: a unit sound, bank `P`, unit type 7 (builder), class `0x25`.
+    Hammer,
 }
 
-/// Guest addresses of the game's three sound banks (`A`, `B`, `P`); the loader receives one of them.
-const BANK_B: u32 = 0x521fe4;
+/// Guest address of the sound bank struct for `P`, which holds the unit sounds.
 const BANK_P: u32 = 0x522000;
+const HAMMER_KEY: u32 = 0x0007_2500;
 
 impl Kind {
-    pub fn of_bank(bank: u32) -> Kind {
+    /// `bank` is the loader's bank struct; `key` the request's `type << 16 | class << 8`.
+    pub fn of_sound(bank: u32, key: u32) -> Kind {
         match bank {
+            BANK_P if key & 0xffff_ff00 == HAMMER_KEY => Kind::Hammer,
             BANK_P => Kind::Speech,
-            BANK_B => Kind::Building,
             _ => Kind::Effect,
         }
     }
@@ -36,14 +37,14 @@ impl Kind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Volumes {
     pub music: u8,
-    pub building: u8,
+    pub hammer: u8,
     pub effects: u8,
     pub speech: u8,
 }
 
 impl Default for Volumes {
     fn default() -> Volumes {
-        Volumes { music: 100, building: 100, effects: 100, speech: 100 }
+        Volumes { music: 100, hammer: 100, effects: 100, speech: 100 }
     }
 }
 
@@ -52,7 +53,7 @@ impl Volumes {
         let pct = match kind {
             Kind::Effect => self.effects,
             Kind::Speech => self.speech,
-            Kind::Building => self.building,
+            Kind::Hammer => self.hammer,
         };
         pct as f32 / 100.0
     }
@@ -61,7 +62,7 @@ impl Volumes {
     pub fn slot(&mut self, i: usize) -> &mut u8 {
         match i {
             0 => &mut self.music,
-            1 => &mut self.building,
+            1 => &mut self.hammer,
             2 => &mut self.effects,
             _ => &mut self.speech,
         }
@@ -74,7 +75,7 @@ impl Volumes {
             let Ok(n) = val.trim().parse::<u8>() else { continue };
             match k.trim() {
                 "music" => v.music = n.min(100),
-                "building" => v.building = n.min(100),
+                "hammer" | "building" => v.hammer = n.min(100),
                 "effects" => v.effects = n.min(100),
                 "speech" => v.speech = n.min(100),
                 _ => {}
@@ -84,7 +85,7 @@ impl Volumes {
     }
 
     pub fn to_text(self) -> String {
-        format!("music={}\nbuilding={}\neffects={}\nspeech={}\n", self.music, self.building, self.effects, self.speech)
+        format!("music={}\nhammer={}\neffects={}\nspeech={}\n", self.music, self.hammer, self.effects, self.speech)
     }
 }
 
@@ -333,8 +334,8 @@ mod tests {
 
     #[test]
     fn volumes_scale_each_kind_and_the_cd() {
-        let mut mx = Mixer { volumes: Volumes { music: 50, building: 0, effects: 100, speech: 25 }, ..Default::default() };
-        for (id, kind) in [(1, Kind::Building), (2, Kind::Speech), (3, Kind::Effect)] {
+        let mut mx = Mixer { volumes: Volumes { music: 50, hammer: 0, effects: 100, speech: 25 }, ..Default::default() };
+        for (id, kind) in [(1, Kind::Hammer), (2, Kind::Speech), (3, Kind::Effect)] {
             let mut v = voice16(&[16384; 4], 44100);
             v.playing = true;
             v.kind = kind;
@@ -342,7 +343,7 @@ mod tests {
             let mut out = [0i16; 2];
             mx.mix(&mut out);
             let want = match kind {
-                Kind::Building => 0,
+                Kind::Hammer => 0,
                 Kind::Speech => 4095,
                 Kind::Effect => 16383,
             };
@@ -358,24 +359,26 @@ mod tests {
 
     #[test]
     fn volumes_round_trip_through_text_and_ignore_junk() {
-        let v = Volumes { music: 10, building: 0, effects: 55, speech: 100 };
+        let v = Volumes { music: 10, hammer: 0, effects: 55, speech: 100 };
         assert_eq!(Volumes::parse(&v.to_text()), v);
         assert_eq!(Volumes::parse(""), Volumes::default());
-        assert_eq!(Volumes::parse("music=500\nspeech=abc\nnonsense\neffects = 7\nbuilding=-3"), Volumes { music: 100, building: 100, effects: 7, speech: 100 });
+        assert_eq!(Volumes::parse("music=500\nspeech=abc\nnonsense\neffects = 7\nbuilding=-3"), Volumes { music: 100, hammer: 100, effects: 7, speech: 100 });
         let mut v = Volumes::default();
         for (i, n) in [(0, 1), (1, 2), (2, 3), (3, 4)] {
             *v.slot(i) = n;
         }
-        assert_eq!(v, Volumes { music: 1, building: 2, effects: 3, speech: 4 });
-        assert_eq!(v.gain(Kind::Building), 0.02);
+        assert_eq!(v, Volumes { music: 1, hammer: 2, effects: 3, speech: 4 });
+        assert_eq!(v.gain(Kind::Hammer), 0.02);
     }
 
     #[test]
-    fn banks_map_to_kinds() {
-        assert_eq!(Kind::of_bank(BANK_P), Kind::Speech);
-        assert_eq!(Kind::of_bank(BANK_B), Kind::Building);
-        assert_eq!(Kind::of_bank(0x521fc8), Kind::Effect);
-        assert_eq!(Kind::of_bank(0), Kind::Effect);
+    fn sounds_map_to_kinds() {
+        assert_eq!(Kind::of_sound(BANK_P, 0x0007_2500), Kind::Hammer);
+        assert_eq!(Kind::of_sound(BANK_P, 0x0007_2501), Kind::Hammer, "low byte is a variant, not part of the class");
+        assert_eq!(Kind::of_sound(BANK_P, 0x0007_0800), Kind::Speech);
+        assert_eq!(Kind::of_sound(BANK_P, 0x0005_2500), Kind::Speech, "other units' class 0x25 sounds are not the hammer");
+        assert_eq!(Kind::of_sound(0x521fe4, 0x0007_2500), Kind::Effect);
+        assert_eq!(Kind::of_sound(0, 0), Kind::Effect);
     }
 
     #[test]

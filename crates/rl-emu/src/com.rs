@@ -792,7 +792,7 @@ mod tests {
         let ds = dsound(&mut uc);
         let fmt = wave_format(&mut uc, 1, 22050, 8);
         let plain = dsound_buffer(&mut uc, ds, 16, fmt);
-        uc.get_data_mut().sound_kind = Kind::Building;
+        uc.get_data_mut().sound_kind = Kind::Hammer;
         let hammer = dsound_buffer(&mut uc, ds, 16, fmt);
         assert_eq!(uc.get_data().sound_kind, Kind::Effect, "the hook's kind is used up by one buffer");
         let again = dsound_buffer(&mut uc, ds, 16, fmt);
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(call(&mut uc, ds, "DuplicateSoundBuffer", &[hammer, out]), 0);
         let dup = rd32(&uc, out);
         let m = uc.get_data().mixer.lock().unwrap();
-        assert_eq!((m.voices[&plain].kind, m.voices[&hammer].kind, m.voices[&again].kind, m.voices[&dup].kind), (Kind::Effect, Kind::Building, Kind::Effect, Kind::Building));
+        assert_eq!((m.voices[&plain].kind, m.voices[&hammer].kind, m.voices[&again].kind, m.voices[&dup].kind), (Kind::Effect, Kind::Hammer, Kind::Effect, Kind::Hammer));
     }
 
     #[test]
