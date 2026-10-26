@@ -17,6 +17,7 @@ the campaign counter at `0x496fe4` to N-1; the game loads mission counter+1 next
 | `att <a> <b> [v]`, `ally <a> <b> [0\|1]` | read/set how much clan `a` likes `b` (-50..50), and clan `a`'s own ally bit for `b` |
 | `grudge <a> <b> <event>` | fire one of the 22 goodwill events (`a` feels it, `b` caused it); see `docs/AI.md` |
 | `diplo <proposer> <ai>` | what a messenger of `proposer` entering the sanctuary of the AI clan `ai` does (starts the AI's answer script) |
+| `steal <unit slot> <building slot> <0-3>` | orders that unit to steal from that building as the thief command does (0-2 resource metal/food/stone, 3 technology); the unit walks over and rolls on its own. See `docs/THIEF.md` |
 | `aiexec <clan> [n]` | run the AI command executor on that clan's task list `n` times (the clans 1-3 only reach it after minutes) |
 | `snap`, `diff`, `diff up` | memory snapshot and what changed since (`up`: u16 words that grew, re-arms itself) |
 

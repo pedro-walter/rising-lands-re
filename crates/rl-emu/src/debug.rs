@@ -28,7 +28,7 @@ fn set_u16(uc: &mut Uc, addr: u32, v: u16) {
     wr_bytes(uc, addr, &v.to_le_bytes());
 }
 
-pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | snap | diff | help";
+pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | steal <unidade> <predio> <0-3> | snap | diff | help";
 
 /// Memory snapshot taken by `snap`, for `diff` (region start, bytes).
 static SNAP: std::sync::Mutex<Vec<(u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
@@ -255,6 +255,14 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
             let (Ok(a), Ok(b), Ok(e)) = (a.parse::<u32>(), b.parse::<u32>(), e.parse::<u32>()) else { return "USO: grudge <vitima> <ofensor> <evento>".into() };
             match call_guest(uc, 0x475118, [a, b, e, 0], &[]) {
                 Ok(_) => "EVENTO APLICADO".into(),
+                Err(e) => e,
+            }
+        }
+        // `steal <unidade> <predio> <0-3>`: orders a unit to steal from a building, like the thief command (0-2 resource, 3 technology).
+        ["steal", u, b, k] => {
+            let (Ok(u), Ok(b), Ok(k)) = (u.parse::<u32>(), b.parse::<u32>(), k.parse::<u32>()) else { return "USO: steal <unidade> <predio> <0-3>".into() };
+            match call_guest(uc, 0x4456c9, [u, 3, b, k], &[]) {
+                Ok(_) => "ORDEM DE ROUBO DADA".into(),
                 Err(e) => e,
             }
         }
@@ -492,7 +500,7 @@ mod tests {
 
     /// Replaces the game functions the console calls with `mov eax, N ; ret`, to check the wiring and arguments.
     fn stub_game_functions(uc: &mut Uc) {
-        for addr in [0x470f98u32, 0x475118, 0x47fc1b, 0x47d314, 0x457b87, 0x457122, 0x4530fd, 0x44fe42, 0x445fbc] {
+        for addr in [0x470f98u32, 0x4456c9, 0x475118, 0x47fc1b, 0x47d314, 0x457b87, 0x457122, 0x4530fd, 0x44fe42, 0x445fbc] {
             // Records the register arguments it was called with at 0x403000 + (addr & 0xff) * 16.
             let log = 0x40_3000 + (addr & 0xff) * 16;
             let mut code = vec![0xa3];
@@ -521,6 +529,8 @@ mod tests {
         assert_eq!(args_of(&uc, 0x475118), [1, 2, 9, 0]);
         assert_eq!(run(&mut uc, "diplo 0 2"), "PROPOSTA ENVIADA");
         assert_eq!(&args_of(&uc, 0x47fc1b)[..2], [0, 2]);
+        assert_eq!(run(&mut uc, "steal 16 0 3"), "ORDEM DE ROUBO DADA");
+        assert_eq!(args_of(&uc, 0x4456c9), [16, 3, 0, 3], "unit, (unused), building, kind");
         assert_eq!(run(&mut uc, "aiexec 2 3"), "EXECUTOR RODOU 3x");
         assert_eq!(args_of(&uc, 0x47d314)[0], 0x5148b0 + 2 * 16);
         run(&mut uc, "aiexec 9");
