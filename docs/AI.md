@@ -231,7 +231,44 @@ looks like a test value that shipped; nothing in the data says whether it is del
 south-east, where the mission asks for a sanctuary. The squads walk to random roam markers (91%), so the extra stream
 is felt across the map rather than at one place.
 
+## Technology of the clans
+
+Research state is one table for all four clans (players 0-3, 16 bytes each at `0x5080f4`): level per area
+(agriculture, military, civil, religion), **current area** at +4, progress (a double) at +8. The discoveries made in
+the current mission are a separate byte per clan at `0x50871c`. Item definitions (`RISING.INI` `AGRICULTURE`,
+`MILITAIRE`, `GENIECIVIL`, `RELIGIEUX`) have a `MISSION` field at +5 of the 12-byte record; the research tick
+(`FUN_0047125c`) only advances an item whose `MISSION` is <= the current mission. In the data that is every item
+except civil 6 (mission 4) and the whole religion tree (mission 7). A clan with 2 discoveries this mission stops.
+
+**Area choice** (`FUN_0047f36e`, at the start and load of every mission): each AI clan has cumulative weights for the
+four areas in its record at `0x51a98c + clan*16` (+5..+8). They are rolled once per campaign: the favoured area gets
+30-49%, the other three share the rest equally (about 17-24% each). Green favours agriculture, red military, yellow a
+random area (rolled once). Each mission it rolls 0-99 against them. Areas whose level has reached their item count
+(`0x498464` = 19, 20, 24, 18) are excluded, and religion is re-rolled until mission 7. Checked at runtime: red
+20/39/20/21%, yellow 21/21/35/23%, green 32/22/22/24%.
+
+**How the AI levels grow** (`FUN_0047fa88`, on winning a mission, screen 0x13): if the mission is 3 or later, each AI clan
+(controller 2) gets as many `FUN_0047149d` calls as the human made **discoveries in the lab this mission** (byte
+`0x50871c[0]`, so 0, 1 or 2), each one a level in the clan's chosen area while it is below its cap. `FUN_0047149d`
+applies the item's effect, so the clan really gets the unit, building or upgrade.
+
+* Only the lab counter is read. It is raised in exactly one place, the research tick when progress reaches the item's
+  cost (`0x47130f`); the other references are save/load, resets and reads. **Stolen technology does not count**:
+  theft calls `FUN_0047149d` for the thief (see `THIEF.md`), which raises the level and resets progress but leaves the
+  counter alone. So researching nothing in a mission, even with stolen techs, gives the AI clans nothing.
+* **Stealing a tech resets your own research progress.** `FUN_0047149d` zeroes the thief clan's progress in its current
+  area (`0x5080fc`/`0x508100` and the lab worker counter `0x508174`) as it adds the level. Any partial progress in
+  the lab is lost, and the stolen level is not a discovery, so it also does not count towards the 2 per mission.
+* The cap is 2 levels per clan per mission, so at most about 44 by mission 24, spread over one area per mission.
+* The clans also run the same research tick. Whether they ever staff a lab and add anything on top was not checked.
+* The black clan has no research; its growth is the map data (see above).
+
 ## Open questions
+
+* What the clans' techs unlock for them in practice (whether the AI trains or builds a unit only once it has the tech).
+* Whether AI clans ever complete a discovery in the lab themselves.
+* Starting levels: a headless run showed non-zero levels for all four clans that were identical across runs, so they
+  were probably loaded from a saved profile; not used.
 
 * Whether the mission-22 60 s spawn point is deliberate.
 * What the A/B/C variants of missions 9, 10, 12 and 17 change besides the layout.

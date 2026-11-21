@@ -393,7 +393,9 @@ impl Machine {
         // The game's sound loader (`FUN_0048aad4`, EDX = the bank, EBX = the channel record that starts with the
         // request key) runs right before it creates the buffer.
         uc.add_code_hook(SOUND_LOAD as u64, SOUND_LOAD as u64, |uc, _, _| {
-            let key = rd32(uc, reg(uc, RegisterX86::EBX));
+            // Some callers arrive with a small non-pointer in EBX (seen: 1); treat those as an unknown key.
+            let mut k = [0u8; 4];
+            let key = if uc.mem_read(reg(uc, RegisterX86::EBX) as u64, &mut k).is_ok() { u32::from_le_bytes(k) } else { 0 };
             let kind = crate::audio::Kind::of_sound(reg(uc, RegisterX86::EDX), key);
             uc.get_data_mut().sound_kind = kind;
         })

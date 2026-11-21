@@ -28,7 +28,7 @@ fn set_u16(uc: &mut Uc, addr: u32, v: u16) {
     wr_bytes(uc, addr, &v.to_le_bytes());
 }
 
-pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | steal <unidade> <predio> <0-3> | snap | diff | help";
+pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | steal <unidade> <predio> <0-3> | call <addr> [eax edx ebx ecx] | snap | diff | help";
 
 /// Memory snapshot taken by `snap`, for `diff` (region start, bytes).
 static SNAP: std::sync::Mutex<Vec<(u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
@@ -263,6 +263,16 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
             let (Ok(u), Ok(b), Ok(k)) = (u.parse::<u32>(), b.parse::<u32>(), k.parse::<u32>()) else { return "USO: steal <unidade> <predio> <0-3>".into() };
             match call_guest(uc, 0x4456c9, [u, 3, b, k], &[]) {
                 Ok(_) => "ORDEM DE ROUBO DADA".into(),
+                Err(e) => e,
+            }
+        }
+        // `call <addr> [eax edx ebx ecx]`: runs any guest function (hex numbers) and prints EAX, for tests of game logic.
+        ["call", addr, regs @ ..] => {
+            let (Some(a), Some(r)) = (hex(addr), regs.iter().take(4).map(|r| hex(r)).collect::<Option<Vec<u32>>>()) else { return "USO: call <endereco> [eax edx ebx ecx]".into() };
+            let mut regs4 = [0u32; 4];
+            regs4[..r.len()].copy_from_slice(&r);
+            match call_guest(uc, a, regs4, &[]) {
+                Ok(eax) => format!("EAX = {eax:#x}"),
                 Err(e) => e,
             }
         }
@@ -535,6 +545,15 @@ mod tests {
         assert_eq!(args_of(&uc, 0x47d314)[0], 0x5148b0 + 2 * 16);
         run(&mut uc, "aiexec 9");
         assert_eq!(args_of(&uc, 0x47d314)[0], 0x5148b0 + 4 * 16, "the clan index is capped at 4");
+    }
+
+    #[test]
+    fn call_runs_a_guest_function_with_registers() {
+        let mut uc = game();
+        // mov eax, edx; ret
+        wr_bytes(&mut uc, 0x47fa88, &[0x89, 0xd0, 0xc3]);
+        assert_eq!(run(&mut uc, "call 47fa88 1 7"), "EAX = 0x7");
+        assert_eq!(run(&mut uc, "call zz"), "USO: call <endereco> [eax edx ebx ecx]");
     }
 
     #[test]

@@ -198,6 +198,16 @@ pub fn call_method(uc: &mut Uc, addr: u32, a: &[u32; 14]) -> Option<u32> {
             if n == 0 {
                 // Stop and forget sound buffers so they don't keep playing or mixing.
                 uc.get_data().mixer.lock().unwrap().voices.remove(&this);
+                // Give back the buffer's sample memory (duplicates share it, so only when the last one goes).
+                if let Some(Obj::DsBuffer { mem, .. }) = uc.get_data().com.objs.get(&this) {
+                    let mem = *mem;
+                    let com = &mut uc.get_data_mut().com;
+                    com.objs.remove(&this);
+                    let shared = com.objs.values().any(|o| matches!(o, Obj::DsBuffer { mem: m, .. } if *m == mem));
+                    if !shared {
+                        uc.get_data_mut().free(mem);
+                    }
+                }
             }
             n
         }
