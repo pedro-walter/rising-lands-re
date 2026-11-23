@@ -18,6 +18,8 @@ Fixes live in the host side or as small patches:
   now holds the loop to `RL_FPS` frames per second (default 30).
 * Saved games and other writable files go to a per-user directory instead of the install folder.
 
+New here? `docs/HOWTO.md` walks through it from the archive.org disc image to a running game.
+
 ## Requirements
 
 Rust, a C compiler and CMake (Unicorn is built from source). On Linux also the SDL2 development
