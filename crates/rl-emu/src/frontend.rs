@@ -75,6 +75,8 @@ pub struct Frontend {
     /// The frame looks like the in-game view (the game draws its own pointer on the map only).
     ingame: bool,
     cursor_drawn: Option<(i32, i32)>,
+    /// When the last redraw happened that was only for a moved pointer (they are rate limited: each present waits for vsync).
+    cursor_present: Option<std::time::Instant>,
     /// The volume options (F10), when open.
     options: Option<Options>,
     /// The on/off switches of the options menu.
@@ -147,7 +149,7 @@ impl Frontend {
         // The device stops when dropped; keep it for the life of the program.
         std::mem::forget(audio_dev);
         let events = sdl.event_pump()?;
-        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None, options: None, prefs: Prefs::default(), mixer })
+        Ok(Frontend { _sdl: sdl, canvas, tex, tex_size: (800, 600), _creator: creator, events, shown: 0, sent_activate: false, movie_tex: None, prompt: None, console: false, last_frame: None, was_overlay: false, pressed_now: Vec::new(), late_release: Vec::new(), wasd: std::env::var_os("RL_WASD").is_some(), toast_drawn: None, ingame: false, cursor_drawn: None, cursor_present: None, options: None, prefs: Prefs::default(), mixer })
     }
 
     /// Applies saved switches at start-up.
@@ -390,7 +392,7 @@ impl Frontend {
     /// The game draws its pointer only over the map; elsewhere (menus, bottom bar) we draw one.
     fn host_cursor(&self, uc: &Uc) -> Option<(i32, i32)> {
         let (x, y) = uc.get_data().cursor;
-        (!(self.ingame && y < 545)).then_some((x, y))
+        (!(self.ingame && y < 545) || uc.get_data().sys_cursor).then_some((x, y))
     }
 
     /// Uploads and shows the primary surface if the guest presented a new frame.
@@ -415,6 +417,13 @@ impl Frontend {
         let hc = if self.options.is_some() { Some(uc.get_data().cursor) } else { self.host_cursor(uc) };
         if n == self.shown && same_toast && self.prompt.is_none() && self.options.is_none() && overlay_on == self.was_overlay && hc == self.cursor_drawn {
             return;
+        }
+        // A moved pointer alone must not make every loop iteration wait for vsync.
+        if n == self.shown && same_toast && self.prompt.is_none() && self.options.is_none() && overlay_on == self.was_overlay {
+            if self.cursor_present.is_some_and(|t| t.elapsed().as_millis() < 16) {
+                return;
+            }
+            self.cursor_present = Some(std::time::Instant::now());
         }
         self.cursor_drawn = hc;
         let new_frame = n != self.shown;

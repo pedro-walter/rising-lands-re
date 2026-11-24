@@ -125,6 +125,11 @@ Measured (mission 1 data, clan 1 as the thief, clan 0 the victim): victim food 5
    in `A`), its research progress is reset to 0 and the item's effect is applied (`FUN_00470f98`). Message 501, the
    counter is halved, the thief is removed. The victim loses nothing.
 
+**Fix in `rl-emu`:** that silent case used to show nothing, which looked like a lost message. `rl-emu` now shows message 503,
+"O roubo não rendeu nada: não há tecnologia a roubar!" (added to `EVENTS.INI` when it is read, `Vfs::TEXT_FIXES`; the
+install is untouched), to the thief's owner. The stub is `patch_silent_tech_theft` in `machine.rs`; the counter and the
+rest of the logic are unchanged. Seen in a mission 18 save: the player led every clan, so every rolled success was silent.
+
 Quirk worth knowing: the comparison uses the victim's current area, the reward goes to the thief clan's current area. In
 the test the victim led agriculture 6 to 2, the thief's clan was researching civil, and the gain was **civil 4 → 5**.
 If the thief's clan is researching something nearly done, the theft effectively completes it and restarts the area's

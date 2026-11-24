@@ -456,11 +456,20 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
         }
         "DefWindowProcA" => 0,
         "SetCursorPos" => {
-            uc.get_data_mut().cursor = (a[0] as i32, a[1] as i32);
+            // The game re-sets the position it just read every tick; that must not overwrite the real
+            // pointer with the clamped one.
+            if (a[0] as i32, a[1] as i32) != uc.get_data().reported_cursor {
+                uc.get_data_mut().cursor = (a[0] as i32, a[1] as i32);
+            }
             1
         }
         "ShowWindow" | "UpdateWindow" | "MoveWindow" | "SetFocus" | "MessageBeep" => 1,
-        "ShowCursor" => 0,
+        // The game shows the "system" pointer when the cursor leaves the inner map area and hides it
+        // when it comes back; its own sprite is only drawn inside. The frontend draws the arrow.
+        "ShowCursor" => {
+            uc.get_data_mut().sys_cursor = a[0] != 0;
+            0
+        }
         "GetActiveWindow" => 0x1000,
         "FindWindowA" => 0,
         "LoadCursorA" | "LoadIconA" | "GetStockObject" => 1,
@@ -476,13 +485,16 @@ fn call_import_inner(uc: &mut Uc, idx: usize, addr: u32, a: &[u32; 14]) -> Optio
             _ => 0,
         },
         "GetCursorPos" => {
-            const EDGE_BAND: i32 = 20;
+            // The game's scroll zones (hit-rect table at 0x5099b4, regions 1-8) are x 0-2 (left), 798-799,
+            // y 0-1 and 598-599.
+            const EDGE_BAND: i32 = 2;
             // Always inside the 800x600 screen: the original indexed tables with the raw cursor
             // position and crashed when it came back from outside the window (archer bug).
             let (x, y) = uc.get_data().cursor;
             let (x, y) = (x.clamp(0, 799), y.clamp(0, 599));
             // With edge scrolling off, the game never sees the pointer in the band it scrolls from.
-            let (x, y) = if uc.get_data().block_edges { (x.clamp(EDGE_BAND, 799 - EDGE_BAND), y.clamp(EDGE_BAND, 599 - EDGE_BAND)) } else { (x, y) };
+            let (x, y) = if uc.get_data().block_edges { (x.clamp(EDGE_BAND + 1, 799 - EDGE_BAND), y.clamp(EDGE_BAND, 599 - EDGE_BAND)) } else { (x, y) };
+            uc.get_data_mut().reported_cursor = (x, y);
             wr32(uc, a[0], x as u32);
             wr32(uc, a[0] + 4, y as u32);
             1
@@ -609,6 +621,7 @@ fn parse_int_prefix(v: &str) -> Option<i32> {
 /// Looks a key up in an INI file on the guest's file system. Parsed files are cached.
 fn profile_value(uc: &mut Uc, file: &str, app: &str, key: &str) -> Option<String> {
     let host = uc.get_data().vfs.resolve(file)?;
+    let host = uc.get_data().vfs.read_path(host);
     let cache_key = host.to_string_lossy().into_owned();
     if !uc.get_data().ini.contains_key(&cache_key) {
         let text: String = std::fs::read(&host).ok()?.iter().map(|&b| b as char).collect();
@@ -1119,7 +1132,16 @@ mod tests {
         uc.get_data_mut().block_edges = true;
         uc.get_data_mut().cursor = (0, 599);
         call(uc, "GetCursorPos", &[pt]);
-        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (20, 579), "kept off the edges when scrolling is off");
+        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (3, 597), "kept off the edges when scrolling is off");
+        uc.get_data_mut().cursor = (0, 100);
+        call(uc, "GetCursorPos", &[pt]);
+        assert_eq!((rd32(uc, pt), rd32(uc, pt + 4)), (3, 100), "clamped");
+        call(uc, "SetCursorPos", &[3, 100]);
+        assert_eq!(uc.get_data().cursor, (0, 100), "echoing the clamped position back keeps the real one");
+        call(uc, "ShowCursor", &[1]);
+        assert!(uc.get_data().sys_cursor);
+        call(uc, "ShowCursor", &[0]);
+        assert!(!uc.get_data().sys_cursor);
         uc.get_data_mut().block_edges = false;
         uc.get_data_mut().keys[0x41] = true;
         assert_eq!(call(uc, "GetAsyncKeyState", &[0x41]), 0x8001);

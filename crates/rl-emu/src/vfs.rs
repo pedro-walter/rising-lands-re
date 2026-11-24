@@ -130,7 +130,19 @@ impl Vfs {
             b"- Proteja uma caverna.\r\n- Estoque 50 sacos de comida e\r\n50 sacos de pedras na caverna.",
             b"- Construa um armaz\xe9m.\r\n- Estoque 50 sacos de comida e\r\n50 sacos de pedras no armaz\xe9m.",
         ),
+        // A technology theft that rolls well but finds nothing to steal showed no message (see
+        // `patch_silent_tech_theft` in machine.rs); message 503 is that case.
+        (
+            "events.ini",
+            b"502 = A tentativa de roubo fracassou!!!\r\n",
+            b"502 = A tentativa de roubo fracassou!!!\r\n503 = O roubo n\xe3o rendeu nada: n\xe3o h\xe1 tecnologia a roubar!\r\n",
+        ),
     ];
+
+    /// The installed file at `host` as the game should read it (with `TEXT_FIXES` applied).
+    pub fn read_path(&self, host: PathBuf) -> PathBuf {
+        self.patched(host)
+    }
 
     fn patched(&self, src: PathBuf) -> PathBuf {
         let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();

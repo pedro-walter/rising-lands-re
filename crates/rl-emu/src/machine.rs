@@ -113,6 +113,10 @@ pub struct State {
     pub click_aligned: bool,
     /// The edge-scroll switch is off and the map is showing: `GetCursorPos` keeps the pointer off the screen edges.
     pub block_edges: bool,
+    /// The game asked for the system pointer (`ShowCursor(1)`): it is outside the inner map area.
+    pub sys_cursor: bool,
+    /// What the last `GetCursorPos` returned (after clamping).
+    pub reported_cursor: (i32, i32),
     /// `--skip-intro`: the game's movies are reported as missing so it moves on at once.
     pub skip_movies: bool,
     /// Debug console: finish buildings the moment they are placed.
@@ -163,6 +167,8 @@ impl State {
             speed: 1.0,
             click_aligned: false,
             block_edges: false,
+            sys_cursor: false,
+            reported_cursor: (-1, -1),
             skip_movies: false,
             instant_build: false,
             next_frame: Instant::now(),
@@ -326,6 +332,50 @@ fn apply_patches(uc: &mut Uc) {
     } else {
         eprintln!("warning: building accessor patch not applied (different RISING.EXE?)");
     }
+    patch_silent_tech_theft(uc);
+}
+
+/// A technology theft whose roll succeeds only does something when the thief's clan has fewer
+/// items than the victim in the victim's current area (`docs/THIEF.md`); otherwise the thief is
+/// spent and the player gets no message at all. The `cmp si, ax; jae` at 0x4562f3 that skips the
+/// success message now goes through a stub in the zero padding at the end of the code that shows
+/// message 503 ("nothing to steal", added to EVENTS.INI by `Vfs::TEXT_FIXES`) to the thief's owner.
+fn patch_silent_tech_theft(uc: &mut Uc) {
+    const SITE: u32 = 0x4562f3;
+    const FALL: u32 = 0x4562f8; // the success path
+    const SKIP: u32 = 0x456324; // after the theft
+    const CAVE: u32 = 0x493a40;
+    const SHOW: u32 = 0x46994b;
+    let rel = |from: u32, to: u32| to.wrapping_sub(from).to_le_bytes();
+    let mut cur = [0u8; 5];
+    let mut pad = [0xffu8; 48];
+    let ok = uc.mem_read(SITE as u64, &mut cur).is_ok()
+        && cur == [0x66, 0x39, 0xc6, 0x73, 0x2c]
+        && uc.mem_read(CAVE as u64, &mut pad).is_ok()
+        && pad.iter().all(|&b| b == 0);
+    if !ok {
+        eprintln!("warning: silent tech theft patch not applied (different RISING.EXE?)");
+        return;
+    }
+    let mut stub = vec![
+        0x66, 0x39, 0xc6, // cmp si, ax
+        0x72, 0x20, // jb fall: the thief's clan is behind, steal as before
+        0x8a, 0x44, 0x24, 0x5c, // mov al, [esp+0x5c]   thief's clan
+        0x3a, 0x05, 0x41, 0x80, 0x50, 0x00, // cmp al, [0x508041]   local player?
+        0x75, 0x0f, // jne skip
+        0xba, 0xf7, 0x01, 0x00, 0x00, // mov edx, 503
+        0xb8, 0x0a, 0x00, 0x00, 0x00, // mov eax, 10
+        0xe8, // call show_message
+    ];
+    stub.extend(rel(CAVE + stub.len() as u32 + 4, SHOW));
+    stub.push(0xe9); // skip: jmp SKIP
+    stub.extend(rel(CAVE + stub.len() as u32 + 4, SKIP));
+    stub.push(0xe9); // fall: jmp FALL
+    stub.extend(rel(CAVE + stub.len() as u32 + 4, FALL));
+    wr_bytes(uc, CAVE, &stub);
+    let mut jmp = vec![0xe9];
+    jmp.extend(rel(SITE + 5, CAVE));
+    wr_bytes(uc, SITE, &jmp);
 }
 
 impl Machine {
