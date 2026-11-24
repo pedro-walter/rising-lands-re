@@ -54,5 +54,10 @@ which makes Ghidra's decompiler noisy. Ghidra 12.1 + JDK 21 live in `tools/` (gi
 Latin-1 text, `[SECTION]` + `KEY=v1,v2,...`, `;` comments (French). `RISING.INI` holds
 per-unit stats (`DEGAT` = 27 damage values indexed by target unit type, `RAYON`, `PORTEE`,
 `FATIGUE`, `RECHARGE`, `TMPSRECRUTE`, `COUT*`, `BLINDAGE`, `NAME` = localized name),
-buildings, spells and research (`AGRICULTURE0..18`, `MILITAIRE0..`). Parsed by `rl_assets::ini`.
+buildings, spells and research. `BLINDAGE` is loaded (byte at `0x4965b9 + type*0x32`) but **never read**:
+the only code touching it is the loader write at `0x44197d`, no pointer to the table exists outside the
+name getter `0x441775`, so it is dead data. Damage is `DEGAT[attacker][target type]` + unit bonus + random, no armour.
+`BONUSCAPITAINE` (`[DIVERS]`, 2) is added when `FUN_004500e4` (`0x4500e4`) finds a unit with the **same owner byte**
+(+0) within 10 tiles (circle) of the attacker's tile (+0x7c). It does **not** test the unit type (the EAX=2 the caller
+passes, probably "captain", is never used) and does not skip the attacker, so it looks like +2 for every hit (`AGRICULTURE0..18`, `MILITAIRE0..`). Parsed by `rl_assets::ini`.
 `RISING.RUL` / `RISING.SBL` are binary and still TBD.

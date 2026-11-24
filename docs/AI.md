@@ -221,6 +221,11 @@ were first, `d` = all three rivals got there before you.
 The variants are different maps (100,000-250,000 bytes differ in 1.3 MB). So the clan that likes you least in the
 campaign is the one you face in 10, 12 and 17: be generous to one clan, or hostile to another, to steer it.
 
+## Mission objectives
+
+See `docs/OBJECTIVES.md` (format, types and the table for all 25 missions). Mission 15's "Expandir seu Clã"
+is a lab-discovery objective: at least one technology researched in your own lab, on top of destroying the enemy clans.
+
 ## Mission 22
 
 `MONDE22.ETA` has 11 spawn points, one ambush point and 251 roam markers. Ten of the spawn points fire every 6 to 25
