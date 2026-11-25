@@ -129,6 +129,14 @@ Each candidate must be reachable (`FUN_0042d4f8`: same region id); it tries up t
 `ProbaCaveJoueur=`, `ProbaCaveIA=`, `ProbaEmbuscade=` and `HumanOnly=` under `[GENERAL]` changes this without any
 code change (the game opens `.\monstre.ini` in its install directory).
 
+**Queue overflow (found in a mission 22 save, fixed in `rl-emu`)**: the pending-action queue (`0x50ae80` count, 16-byte
+records from `0x50ae84`: counter, `0x51a9e0` entry, timer, tile | command << 16) accepts 50 records, but the wave table
+(`0x50af84`) starts at record 16. With more than 16 squads active the records overwrite the table; the next wave then
+reads those bytes as unit counts (172 bunkers, 44 druids, 26 archers, 7 helicopters...) at the spawn point, the new squads
+fill the queue further, and hundreds of black-clan units clog the pathfinder. Saved games store the table as it was
+(`0x47b8e8` writes it, `0x47b840` reads it, but only 4 queue records), so the corruption survives a reload. `rl-emu` caps
+the queue at 16 (`0x47aad4`, `0x47ab20`) and rebuilds the table from `MONSTRE.INI` after a saved game is read.
+
 ### Waves per mission (from the `.ETA` files)
 
 Interval in seconds at normal speed; "groups" are `MONSTRE.INI` `GROUPEnn` levels, so 0 = one soldier,

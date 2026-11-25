@@ -619,7 +619,7 @@ fn parse_int_prefix(v: &str) -> Option<i32> {
 }
 
 /// Looks a key up in an INI file on the guest's file system. Parsed files are cached.
-fn profile_value(uc: &mut Uc, file: &str, app: &str, key: &str) -> Option<String> {
+pub(crate) fn profile_value(uc: &mut Uc, file: &str, app: &str, key: &str) -> Option<String> {
     let host = uc.get_data().vfs.resolve(file)?;
     let host = uc.get_data().vfs.read_path(host);
     let cache_key = host.to_string_lossy().into_owned();

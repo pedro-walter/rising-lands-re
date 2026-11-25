@@ -333,6 +333,47 @@ fn apply_patches(uc: &mut Uc) {
         eprintln!("warning: building accessor patch not applied (different RISING.EXE?)");
     }
     patch_silent_tech_theft(uc);
+    patch_action_queue_cap(uc);
+}
+
+/// The black clan's pending-action queue (`0x50ae80` count, 16-byte records from `0x50ae84`, see
+/// `docs/AI.md`) accepts up to 50 records, but the wave table (`0x50af84`) starts at record 16. Once more than
+/// 16 squads are active the records overwrite the table, and the next waves spawn whatever bytes they find
+/// there: hundreds of bunkers, druids and helicopters, clogging the pathfinder. Both capacity checks
+/// (`cmp edi, 0x32` at 0x47aad2 and `cmp [0x50ae80], 0x32` at 0x47ab1a) now stop at 16.
+fn patch_action_queue_cap(uc: &mut Uc) {
+    const SITES: [(u32, &[u8]); 2] = [(0x47aad2, &[0x83, 0xff, 0x32]), (0x47ab1a, &[0x83, 0x3d, 0x80, 0xae, 0x50, 0x00, 0x32])];
+    for (addr, orig) in SITES {
+        let mut cur = vec![0u8; orig.len()];
+        if uc.mem_read(addr as u64, &mut cur).is_ok() && cur == orig {
+            wr_bytes(uc, addr + orig.len() as u32 - 1, &[16]);
+        } else {
+            eprintln!("warning: action queue cap patch not applied at {addr:#x} (different RISING.EXE?)");
+        }
+    }
+}
+
+/// Rebuilds the wave table (`0x50af84`: 16 groups x 26 unit types of counts, `0x50b124`: units per group) from
+/// `MONSTRE.INI` the way `FUN_0047a601` does. Saved games store the table as it was in memory, so saves made
+/// after the queue overflow above carry a corrupted one; this runs right after the loader read it.
+pub fn rebuild_wave_table(uc: &mut Uc) {
+    const TABLE: u32 = 0x50af84;
+    const SIZES: u32 = 0x50b124;
+    const KINDS: u32 = 0x498400; // group value -> unit type
+    let mut table = [0u8; 16 * 26];
+    let mut sizes = [0u8; 16];
+    for g in 0..16usize {
+        let Some(list) = win32::profile_value(uc, ".\\monstre.ini", "GENERAL", &format!("GROUPE{g:02}")) else { continue };
+        for v in list.split(',').filter_map(|t| t.trim().parse::<u8>().ok()) {
+            let kind = rd_bytes(uc, KINDS + v as u32, 1)[0] as usize;
+            if kind < 26 {
+                table[g * 26 + kind] = table[g * 26 + kind].wrapping_add(1);
+                sizes[g] = sizes[g].wrapping_add(1);
+            }
+        }
+    }
+    wr_bytes(uc, TABLE, &table);
+    wr_bytes(uc, SIZES, &sizes);
 }
 
 /// A technology theft whose roll succeeds only does something when the thief's clan has fewer
@@ -461,6 +502,8 @@ impl Machine {
             })
             .map_err(|e| format!("sound hook: {e:?}"))?;
         }
+        // The saved-game loader has just read the wave table (`call 0x458461` at 0x47b8ac): rebuild it from the INI.
+        uc.add_code_hook(0x47b8b1, 0x47b8b1, |uc, _, _| rebuild_wave_table(uc)).map_err(|e| format!("wave hook: {e:?}"))?;
         // RL_TRACE=<hex addr>[,<hex addr>...] logs the registers each time the guest reaches an address.
         if let Ok(spec) = std::env::var("RL_TRACE") {
             for a in spec.split(',').filter_map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()) {
@@ -771,6 +814,18 @@ mod tests {
         wr_bytes(&mut uc, 0x41a4f4, &[0x52, 0x31, 0xd2, 0x66, 0x89, 0xc2, 0x89, 0xd0]);
         apply_patches(&mut uc);
         assert_eq!(rd_bytes(&uc, 0x41a4f4, 3), [0x0f, 0xb7, 0xc0]);
+    }
+
+    #[test]
+    fn action_queue_cap_patch_applies_only_to_the_original_bytes() {
+        let mut uc = bare_uc();
+        patch_action_queue_cap(&mut uc);
+        assert_eq!(rd_bytes(&uc, 0x47aad4, 1), [0], "unknown code is left alone");
+        wr_bytes(&mut uc, 0x47aad2, &[0x83, 0xff, 0x32]);
+        wr_bytes(&mut uc, 0x47ab1a, &[0x83, 0x3d, 0x80, 0xae, 0x50, 0x00, 0x32]);
+        patch_action_queue_cap(&mut uc);
+        assert_eq!(rd_bytes(&uc, 0x47aad2, 3), [0x83, 0xff, 16]);
+        assert_eq!(rd_bytes(&uc, 0x47ab20, 1), [16]);
     }
 
     #[test]
