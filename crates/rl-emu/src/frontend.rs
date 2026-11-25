@@ -4,7 +4,7 @@ use crate::{com, machine::*, options::{Options, Prefs}, overlay};
 use std::time::Instant;
 use sdl2::{
     event::{Event, WindowEvent},
-    keyboard::Keycode,
+    keyboard::{Keycode, Scancode},
     mouse::MouseButton,
     pixels::PixelFormatEnum,
     render::{Canvas, Texture, TextureCreator},
@@ -47,6 +47,12 @@ impl Ui {
     }
 }
 
+/// The key that opens the debug console: the one left of `1` (`~`/backtick on US keyboards, `'` on ABNT2).
+/// Matched by physical position (scancode) so that it works in every layout; the keycode is a fallback.
+fn is_console_key(e: &Event) -> bool {
+    matches!(e, Event::KeyDown { scancode: Some(Scancode::Grave), repeat: false, .. } | Event::KeyDown { keycode: Some(Keycode::Backquote), repeat: false, .. })
+}
+
 pub struct Frontend {
     _sdl: Sdl,
     canvas: Canvas<Window>,
@@ -60,7 +66,7 @@ pub struct Frontend {
     movie_tex: Option<Texture<'static>>,
     /// Text being typed in the host-address prompt, when it is open.
     prompt: Option<String>,
-    /// The open prompt is the debug console (F12) rather than the host-address one.
+    /// The open prompt is the debug console (the key left of 1) rather than the host-address one.
     console: bool,
     last_frame: Option<(u32, u32, Vec<u8>)>,
     was_overlay: bool,
@@ -182,6 +188,10 @@ impl Frontend {
         let events: Vec<Event> = self.events.poll_iter().collect();
         for e in events {
             // While the prompt is open it gets all the keyboard input.
+            if self.console && self.prompt.is_some() && is_console_key(&e) {
+                self.prompt = None;
+                continue;
+            }
             if let Some(text) = self.prompt.as_mut() {
                 match &e {
                     Event::TextInput { text: t, .. } => {
@@ -226,7 +236,7 @@ impl Frontend {
                 self.options = Some(Options::default());
                 continue;
             }
-            if let Event::KeyDown { keycode: Some(Keycode::F12), repeat: false, .. } = e {
+            if is_console_key(&e) {
                 self.console = true;
                 self.prompt = Some(String::new());
                 continue;
@@ -705,8 +715,8 @@ mod tests {
         fe.pump(&mut uc);
         assert_eq!(msgs(&mut uc), [(WM_CHAR, b'h' as u32, 1), (WM_CHAR, b'i' as u32, 1)]);
 
-        // F12 opens the console prompt: keys go to it instead of the game, Enter runs the command.
-        ev.push_event(key(Keycode::F12, true, none)).unwrap();
+        // The key left of 1 opens the console prompt: keys go to it instead of the game, Enter runs the command.
+        ev.push_event(key(Keycode::Backquote, true, none)).unwrap();
         push_text("poke 401000 9 1");
         ev.push_event(key(Keycode::Return, true, none)).unwrap();
         fe.pump(&mut uc);

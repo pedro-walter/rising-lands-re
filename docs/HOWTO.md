@@ -91,7 +91,7 @@ cargo run --release -p rl-emu -- --mission 5     # jump to mission 5 (about 2 mi
 ```
 
 Useful keys: `Alt+Enter` full screen, `F10` options (music, effects, voices, edge scrolling),
-`F1`-`F3` game speed, `Esc` skips a movie, `F12` debug console. The README lists all of them, plus
+`F1`-`F3` game speed, `Esc` skips a movie, the key left of `1` (`~`/`'`) debug console. The README lists all of them, plus
 the multiplayer setup and the `RL_*` environment variables.
 
 Saved games go to your per-user data directory (or `RL_USERDIR`), never into `original/`.

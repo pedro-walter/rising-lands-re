@@ -1,5 +1,5 @@
 //! Debug console: commands that poke the running game's memory (stockpile, cheats, ...).
-//! Opened with F12 in the window, or from scripts with `dbg <command>`.
+//! Opened with the key left of `1` in the window, or from scripts with `dbg <command>`.
 
 use crate::machine::{rd32, rd_bytes, reg, set_reg, wr32, wr_bytes, Uc};
 use unicorn_engine::RegisterX86 as R;
@@ -28,7 +28,7 @@ fn set_u16(uc: &mut Uc, addr: u32, v: u16) {
     wr_bytes(uc, addr, &v.to_le_bytes());
 }
 
-pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | steal <unidade> <predio> <0-3> | call <addr> [eax edx ebx ecx] | snap | diff | help";
+pub const HELP: &str = "res <metal|comida|pedra|all> <n> [jogador] | tech [area n [jogador]] | instant [on|off] | spawn <tipo> [x y] [jogador] | tab <addr> <tam> <n> [deref] | peek <addr> [n] | poke <addr> <valor> [1|2|4] | clas | att <a> <b> [valor] | ally <a> <b> [0|1] | purge [jogador] | owner <de> <para> [tipo] | diplo <proponente> <ia> | aiexec <jogador> [n] | grudge <vitima> <ofensor> <evento> | steal <unidade> <predio> <0-3> | call <addr> [eax edx ebx ecx] | snap | diff | help";
 
 /// Memory snapshot taken by `snap`, for `diff` (region start, bytes).
 static SNAP: std::sync::Mutex<Vec<(u64, Vec<u8>)>> = std::sync::Mutex::new(Vec::new());
@@ -214,6 +214,29 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
             format!("{n} REGISTROS EM {a:#x}")
         }
         // Player records (0x14 bytes at [0x5080a8]): controller (+1), ally mask (+6), attitude toward each clan (+0xc, i16).
+        // `purge [clan]`: removes every unit of that clan (default 4, the black clan) the way a spent thief goes: the
+        // game's own order reset (`FUN_00457058`, AX = slot) and then state 0. For the black clan it also empties the
+        // wave bookkeeping (live monsters `0x50b178`, queued squads `0x50b134`, pending actions `0x50ae80`).
+        ["purge", rest @ ..] => {
+            let Some(owner) = rest.first().map_or(Some(4u8), |a| a.parse().ok()) else { return "USO: purge [jogador]".into() };
+            let base = rd32(uc, 0x4e19a0);
+            let mut n = 0;
+            for slot in 1..800u32 {
+                let rec = base + slot * 0x114;
+                let b = rd_bytes(uc, rec, 3);
+                if b[0] == owner && b[2] != 0 {
+                    let _ = call_guest(uc, 0x457058, [slot, 0, 0, 0], &[]);
+                    wr_bytes(uc, rec + 2, &[0]);
+                    n += 1;
+                }
+            }
+            if owner == 4 {
+                wr32(uc, 0x50b178, 0);
+                wr_bytes(uc, 0x50b134, &[0]);
+                wr32(uc, 0x50ae80, 0);
+            }
+            format!("{n} unidades removidas (jogador {owner})")
+        }
         ["clas"] => {
             let base = rd32(uc, PLAYERS);
             for p in 0..4u32 {
@@ -234,6 +257,22 @@ pub fn run(uc: &mut Uc, line: &str) -> String {
             }
             let v = rd_bytes(uc, addr, 2);
             format!("atitude[{a}][{b}] = {}", i16::from_le_bytes([v[0], v[1]]))
+        }
+        // `owner <from> <to> [type]`: gives every building of clan `from` (optionally only of that type, 9 = wall) to clan `to`.
+        // Allied buildings cannot be attacked (FUN_0041a61c), so this frees e.g. the allied walls of mission 23.
+        ["owner", from, to, rest @ ..] => {
+            let (Ok(from), Ok(to)) = (from.parse::<u8>(), to.parse::<u8>()) else { return "USO: owner <de> <para> [tipo]".into() };
+            let ty = rest.first().and_then(|t| t.parse::<u8>().ok());
+            let mut n = 0;
+            for i in 0..1000u32 {
+                let rec = BLD_TABLE + i * BLD_SIZE;
+                let b = rd_bytes(uc, rec, 0x10);
+                if b[4] == from && b[5] != 0 && ty.is_none_or(|t| b[8] == t) {
+                    wr_bytes(uc, rec + 4, &[to]);
+                    n += 1;
+                }
+            }
+            format!("{n} construcoes: dono {from} -> {to}")
         }
         ["ally", a, b, rest @ ..] => {
             let (Ok(a), Ok(b)) = (a.parse::<u32>(), b.parse::<u32>()) else { return "USO: ally <a> <b> [0|1]".into() };
@@ -488,6 +527,19 @@ mod tests {
     }
 
     #[test]
+    fn owner_moves_walls_between_clans() {
+        let mut uc = game();
+        for (i, (own, ty)) in [(3u8, 9u8), (3, 9), (3, 6), (1, 9)].into_iter().enumerate() {
+            wr_bytes(&mut uc, BLD_TABLE + i as u32 * BLD_SIZE + 4, &[own, 5]);
+            wr_bytes(&mut uc, BLD_TABLE + i as u32 * BLD_SIZE + 8, &[ty]);
+        }
+        assert_eq!(run(&mut uc, "owner 3 2 9"), "2 construcoes: dono 3 -> 2");
+        assert_eq!(rd_bytes(&uc, BLD_TABLE + 2 * BLD_SIZE + 4, 1), [3], "other types untouched");
+        assert_eq!(rd_bytes(&uc, BLD_TABLE + 4, 1), [2]);
+        assert_eq!(run(&mut uc, "owner x 2"), "USO: owner <de> <para> [tipo]");
+    }
+
+    #[test]
     fn ents_reports_used_slots_and_first_free() {
         let mut uc = game();
         wr_bytes(&mut uc, BLD_TABLE + 5, &[5]);
@@ -586,6 +638,23 @@ mod tests {
         run(&mut uc, "tech civil 99");
         assert_eq!(rd_bytes(&uc, TECH_DONE + 2, 1), [30]);
         assert_eq!(run(&mut uc, "tech"), "agricultura 0, militar 0, civil 30, religiao 0");
+    }
+
+    #[test]
+    fn purge_removes_the_units_of_one_clan() {
+        let mut uc = game();
+        stub_game_functions(&mut uc);
+        let table = 0x50_0000u32;
+        wr32(&mut uc, 0x4e19a0, table);
+        for (slot, owner) in [(1u32, 4u8), (2, 0), (3, 4)] {
+            wr_bytes(&mut uc, table + slot * 0x114, &[owner]);
+            wr_bytes(&mut uc, table + slot * 0x114 + 2, &[7]);
+        }
+        wr32(&mut uc, 0x50b178, 99);
+        assert_eq!(run(&mut uc, "purge"), "2 unidades removidas (jogador 4)");
+        assert_eq!(rd_bytes(&uc, table + 0x114 + 2, 1), [0]);
+        assert_eq!(rd_bytes(&uc, table + 0x114 * 2 + 2, 1), [7], "other clans stay");
+        assert_eq!(rd32(&uc, 0x50b178), 0);
     }
 
     #[test]

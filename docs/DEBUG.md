@@ -1,6 +1,6 @@
 # Debug console and tooling
 
-Press **F12** in the window to open the console (Enter runs, Esc closes). From scripts use
+Press the key **left of `1`** in the window (`~` on a US keyboard, `'` on ABNT2; matched by position) to open the console (Enter runs, Esc closes). From scripts use
 `RL_SCRIPT="45:dbg:res comida 500"`. Launch flags: `--skip-intro`, `--new-game` (mission 1), `--mission N` / `--map <MONDEnn.ETA>` (mission N, ~2 min: it wins mission 1 with a full stockpile after setting
 the campaign counter at `0x496fe4` to N-1; the game loads mission counter+1 next).
 
@@ -11,12 +11,14 @@ the campaign counter at `0x496fe4` to N-1; the game loads mission counter+1 next
 | `tech` | researched count per area; `tech <agricultura\|militar\|civil\|religiao> <n> [player]` researches up to `n` (applies each effect through the game's own function) |
 | `spawn <type 0-25> [x y] [player]` | creates a unit (default: next to the first building) by calling the game's own unit init |
 | `tab <addr> <stride> <n> [deref]` | dump the non-empty records of a table |
+| `owner <from> <to> [type]` | gives every building of clan `from` (only type `type` if given, 9 = wall) to clan `to`. Allied buildings cannot be attacked, so in mission 23 `owner 3 2 9` hands the 365 allied green walls to yellow |
 | `ents` | list the entity table (buildings) |
 | `peek <hex> [n]`, `poke <hex> <v> [1\|2\|4]` | read/write guest memory |
 | `clas` | the four player records: controller, ally mask (each clan has its own bit), attitude towards each clan |
 | `att <a> <b> [v]`, `ally <a> <b> [0\|1]` | read/set how much clan `a` likes `b` (-50..50), and clan `a`'s own ally bit for `b` |
 | `grudge <a> <b> <event>` | fire one of the 22 goodwill events (`a` feels it, `b` caused it); see `docs/AI.md` |
 | `diplo <proposer> <ai>` | what a messenger of `proposer` entering the sanctuary of the AI clan `ai` does (starts the AI's answer script) |
+| `purge [clan]` | removes every unit of that clan (default 4, the black clan) like a spent thief (`FUN_00457058`, state 0) and resets the wave bookkeeping; clears the monster flood of a save made before the queue fix (`docs/AI.md`) |
 | `steal <unit slot> <building slot> <0-3>` | orders that unit to steal from that building as the thief command does (0-2 resource metal/food/stone, 3 technology); the unit walks over and rolls on its own. See `docs/THIEF.md` |
 | `aiexec <clan> [n]` | run the AI command executor on that clan's task list `n` times (the clans 1-3 only reach it after minutes) |
 | `snap`, `diff`, `diff up` | memory snapshot and what changed since (`up`: u16 words that grew, re-arms itself) |
